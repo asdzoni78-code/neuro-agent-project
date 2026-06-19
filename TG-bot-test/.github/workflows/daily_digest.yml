@@ -1,0 +1,29 @@
+name: Утренний дайджест
+
+on:
+  schedule:
+    - cron: '0 5 * * *'  # 8:00 по Москве (UTC+3)
+  workflow_dispatch:       # ручной запуск из GitHub
+
+jobs:
+  run-agent:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Установка зависимостей
+        run: pip install -r requirements.txt
+
+      - name: Запуск агента
+        env:
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python agent.py
