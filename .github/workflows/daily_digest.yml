@@ -2,7 +2,7 @@ name: Утренний дайджест
 
 on:
   schedule:
-    - cron: '0 5 * * *'  # 8:00 по Москве (UTC+3)
+    - cron: '0 2 * * *'  # 5:00 по Москве (UTC+3)
   workflow_dispatch:       # ручной запуск из GitHub
 
 jobs:
