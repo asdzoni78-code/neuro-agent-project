@@ -26,4 +26,4 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python TG-bot-test/agent.py
+        run: python TG-bot-test/agent_new.py
