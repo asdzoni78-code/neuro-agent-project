@@ -438,9 +438,12 @@ function calcProject() {
         });
 
         // Копим в объектный агрегат.
-        if (!matAgg[id]) matAgg[id] = { plan_t: 0, fact_t: 0 };
+        if (!matAgg[id]) matAgg[id] = { plan_t: 0, fact_t: 0, responsibles: {} };
         matAgg[id].plan_t += bm.plan_t;
         matAgg[id].fact_t += bm.fact_t;
+        // Собираем множество ответственных, которые работали с этим материалом,
+        // чтобы показать их в таблице сравнения на уровне объекта.
+        if (rc.responsible) matAgg[id].responsibles[rc.responsible] = true;
       });
 
       rooms.push({
