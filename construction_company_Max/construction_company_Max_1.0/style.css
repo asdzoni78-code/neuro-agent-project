@@ -394,6 +394,14 @@ body {
 .cmp-overrun { color: var(--danger); font-weight: 600; }
 .row-overrun { background: rgba(220, 53, 69, .06); }
 
+/* Зоны отклонения по порогу (пункт «порог %»):
+   alert  — значимый перерасход  → красный;
+   under  — значимый недорасход  → жёлтый «проверить». */
+.cmp-alert { color: var(--danger); font-weight: 600; }
+.row-alert { background: rgba(220, 53, 69, .06); }
+.cmp-under { color: #9a3412; font-weight: 600; }
+.row-under { background: rgba(249, 115, 22, .10); }
+
 /* Итоговая строка. */
 .cmp-total td { font-weight: 700; border-top: 2px solid var(--border); background: var(--bg); }
 
@@ -558,3 +566,44 @@ body.ai-modal-open { overflow: hidden; }
 /* Сплошная красная кнопка (на случай использования kind='danger'). */
 .btn-danger-solid { background: var(--danger); color: #fff; border-color: var(--danger); }
 .btn-danger-solid:hover { filter: brightness(.95); }
+
+/* ============================================================
+   ДОРАБОТКИ: блокировка ст.1, маркеры, откосы, справочник
+   ============================================================ */
+
+/* Оболочка полей замера. Нативный [disabled] на fieldset гасит все поля ст.1. */
+.measure-fields { border: 0; padding: 0; margin: 0; min-width: 0; }
+.measure-fields[disabled] { opacity: .55; }
+
+/* Цветной кружок-маркер норма/перерасход (пункт 6). */
+.thick-marker {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  vertical-align: middle;
+  background: var(--border);
+}
+.thick-marker.mk-norm    { background: var(--success); }
+.thick-marker.mk-over    { background: var(--danger); }
+.thick-marker.mk-under   { background: var(--warning); }
+.thick-marker.mk-neutral { background: var(--border); }
+
+/* Карточка откоса (двухстадийный замер, пункт 3). */
+.slope-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: var(--gap-sm) var(--gap-md);
+  margin-bottom: var(--gap-sm);
+}
+.slope-head { display: flex; align-items: center; justify-content: space-between; }
+.slope-title { font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); }
+.slope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap-sm) var(--gap-md); }
+@media (max-width: 560px) { .slope-grid { grid-template-columns: 1fr; } }
+
+/* Панель действий на экране «Сравнение» (кнопка справочника, пункт 2). */
+.cmp-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--gap-md); }
+
+/* Таблица справочника материалов в модалке (пункт 2). */
+.mat-table td { vertical-align: middle; }
+.mat-table input { width: 100%; }
+.mat-table .mat-num { text-align: right; }

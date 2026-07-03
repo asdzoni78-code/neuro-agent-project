@@ -19,11 +19,19 @@ function defaultMaterials() {
   ];
 }
 
+// Настройки объекта. overrunThresholdPct — порог значимости отклонения в %:
+// перерасход ≥ порога → тревога (красный, TG-алерт); недорасход ≥ порога →
+// «проверить» (жёлтый). Меньше порога в любую сторону → норма. По умолчанию 5%.
+function defaultSettings() {
+  return { overrunThresholdPct: 5 };
+}
+
 // Дефолтный state — используется при первом запуске или битом localStorage.
 function defaultState() {
   return {
     project: { name: 'Объект', floors: [] },
-    materials: defaultMaterials()
+    materials: defaultMaterials(),
+    settings: defaultSettings()
   };
 }
 
@@ -69,7 +77,12 @@ function load() {
         : defaultState().project,
       materials: Array.isArray(parsed.materials) && parsed.materials.length
         ? parsed.materials
-        : defaultMaterials()
+        : defaultMaterials(),
+      // Мягкая миграция: у старых данных секции settings нет → подставляем дефолт.
+      settings: (parsed.settings && typeof parsed.settings === 'object'
+                 && Number.isFinite(Number(parsed.settings.overrunThresholdPct)))
+        ? { overrunThresholdPct: Math.max(0, Number(parsed.settings.overrunThresholdPct)) }
+        : defaultSettings()
     };
     return state;
   } catch (err) {
@@ -127,6 +140,31 @@ function round(v, digits) {
   const d = num(digits);
   const f = Math.pow(10, d);
   return Math.round(num(v) * f) / f;
+}
+
+// thresholdPct() — текущий порог значимости отклонения, %. Читается из настроек,
+// с откатом на 5% при отсутствии/битом значении. 0 — валиден (любое отклонение значимо).
+function thresholdPct() {
+  const s = (state && state.settings) ? state.settings : null;
+  const v = s ? Number(s.overrunThresholdPct) : NaN;
+  return (Number.isFinite(v) && v >= 0) ? v : 5;
+}
+
+// deviationFlags(plan_t, fact_t, delta_t) — зоны отклонения по порогу (двусторонние):
+//   overrun    — есть перерасход (факт>план), любой величины;
+//   alert      — значимый перерасход (|%| ≥ порог) → красный + TG-алерт;
+//   undershoot — значимый недорасход (факт≪план, |%| ≥ порог) → жёлтый «проверить».
+// Край: план=0, факт>0 → |%|=∞ ≥ порог → alert. Экономия/перерасход < порога → норма.
+function deviationFlags(plan_t, fact_t, delta_t) {
+  const thr = thresholdPct();
+  const absPct = (plan_t !== 0) ? Math.abs(delta_t / plan_t) * 100 : (fact_t > 0 ? Infinity : 0);
+  const isOver = delta_t < 0;
+  const isUnder = delta_t > 0;
+  return {
+    overrun: isOver,
+    alert: isOver && absPct >= thr,
+    undershoot: isUnder && absPct >= thr
+  };
 }
 
 // materialById(id) — норма/цена/смета из справочника state.materials.
@@ -275,26 +313,43 @@ function calcWall(room, wallKey) {
 }
 
 // ----------------------------------------------------------------------------
-// 3) calcSlope(slope) — ОТКОС
-//   area_m2 = (perimeter × width) / 1e6
+// 3) calcSlope(slope) — ОТКОС (двухстадийный)
+//   area_m2 = (perimeter × width) / 1e6         (width — глубина плоскости откоса)
+//   План.толщина  — thicknessPlan (задаётся на ст.1; откат на старое thickness).
+//   Факт.толщина  — из того, насколько уменьшился ПРОЁМ окна/двери после
+//     штукатурки откосов (замер проёма на ст.1 и ст.2):
+//       боковые откосы «съедают» ширину с двух сторон → t = (openW1 − openW2)/2
+//       верхний откос  «съедает» высоту сверху        → t = (openH1 − openH2)
+//     Берём среднее доступных оценок; если проём не замерян — факт = план.
 //   consumption_t = area × (толщина_мм/10) × норма / 1000
-// У откоса одна толщина (thickness) — план и факт совпадают: это накладной
-// элемент без двухстадийного замера.
 // ----------------------------------------------------------------------------
 function calcSlope(slope) {
   const s = (slope && typeof slope === 'object') ? slope : {};
   const mat = materialById(s.materialId);
   const area_m2 = (num(s.perimeter) * num(s.width)) / 1000000;
-  const cons = consumption(area_m2, num(s.thickness), mat.norm);
+
+  // План: новое поле thicknessPlan, с откатом на старое единое thickness.
+  const planThickness = num(
+    (s.thicknessPlan !== undefined && s.thicknessPlan !== '') ? s.thicknessPlan : s.thickness
+  );
+
+  // Факт: оценки толщины из разницы размеров проёма между стадиями.
+  const ests = [];
+  if (num(s.openW1) > 0 && num(s.openW2) > 0) ests.push((num(s.openW1) - num(s.openW2)) / 2);
+  if (num(s.openH1) > 0 && num(s.openH2) > 0) ests.push(num(s.openH1) - num(s.openH2));
+  const factThickness = ests.length
+    ? ests.reduce(function (a, b) { return a + b; }, 0) / ests.length
+    : planThickness; // нет замеров проёма — считаем факт равным плану
+
   return {
     surface: 'slope',
     id: s.id || null,
     materialId: s.materialId || null,
     materialName: mat.name,
     area_m2: area_m2,
-    thickness_mm: num(s.thickness),
-    plan: { consumption_t: cons },
-    fact: { consumption_t: cons }
+    thickness_mm: planThickness, // обратная совместимость (использовалось где-то)
+    plan: { thickness_mm: planThickness, consumption_t: consumption(area_m2, planThickness, mat.norm) },
+    fact: { thickness_mm: factThickness, consumption_t: consumption(area_m2, factThickness, mat.norm) }
   };
 }
 
@@ -426,6 +481,7 @@ function calcProject() {
       Object.keys(rc.byMaterial).forEach(function (id) {
         const bm = rc.byMaterial[id];
         const delta_t = bm.plan_t - bm.fact_t; // Δ<0 → перерасход
+        const rf = deviationFlags(bm.plan_t, bm.fact_t, delta_t);
         roomMaterials.push({
           materialId: bm.materialId,
           materialName: bm.materialName,
@@ -434,7 +490,9 @@ function calcProject() {
           delta_t: delta_t,
           delta_rub: delta_t * bm.price,
           percent: bm.plan_t !== 0 ? (delta_t / bm.plan_t) * 100 : 0,
-          overrun: delta_t < 0
+          overrun: rf.overrun,
+          alert: rf.alert,
+          undershoot: rf.undershoot
         });
 
         // Копим в объектный агрегат.
@@ -467,6 +525,7 @@ function calcProject() {
     const fact_t = agg.fact_t;
     const delta_t = plan_t - fact_t;              // Δ<0 → перерасход
     const delta_rub = delta_t * num(mat.price);
+    const mf = deviationFlags(plan_t, fact_t, delta_t);
     materials.push({
       materialId: id,
       materialName: mat.name,
@@ -477,13 +536,22 @@ function calcProject() {
       delta_rub: delta_rub,
       percent: plan_t !== 0 ? (delta_t / plan_t) * 100 : 0,
       price: num(mat.price),
-      overrun: delta_t < 0
+      overrun: mf.overrun,
+      alert: mf.alert,
+      undershoot: mf.undershoot,
+      responsible: Object.keys(agg.responsibles || {}).join(', ') // кто работал с материалом
     });
     totals.plan_t += plan_t;
     totals.fact_t += fact_t;
     totals.delta_t += delta_t;
     totals.delta_rub += delta_rub;
   });
+
+  // Зоны отклонения для итоговой строки.
+  const tf = deviationFlags(totals.plan_t, totals.fact_t, totals.delta_t);
+  totals.overrun = tf.overrun;
+  totals.alert = tf.alert;
+  totals.undershoot = tf.undershoot;
 
   return {
     projectName: project.name || '',
@@ -507,6 +575,10 @@ function calcProject() {
 
 let currentRoomId = null;   // id выбранного помещения (экран 2)
 let currentStage = 1;       // редактируемая стадия: 1 | 2
+// Какие «гармошки» стен раскрыты (ключ A/B/V/G → true). Запоминаем, чтобы
+// перерисовка формы (после выбора материала/добавления проёма) не схлопывала
+// открытую стену — иначе прораб терял место, где работал (пункт 4).
+let openWalls = {};
 
 // esc(s) — экранирование для безопасной вставки в innerHTML.
 function esc(s) {
@@ -560,8 +632,10 @@ function emptyStage() {
 }
 
 // newRoom() — новое помещение с двумя пустыми стадиями.
+// locked=false: стадия 1 редактируется свободно, пока прораб не перейдёт на ст.2
+// и не подтвердит, что все размеры внесены (пункт 5).
 function newRoom(name) {
-  return { id: uuid(), name: name || 'Помещение', stage1: emptyStage(), stage2: emptyStage() };
+  return { id: uuid(), name: name || 'Помещение', locked: false, stage1: emptyStage(), stage2: emptyStage() };
 }
 
 // ensureStage(room, n) — гарантировать, что у комнаты есть корректная стадия n
@@ -737,6 +811,7 @@ function bindRoomsEvents(root) {
     } else if (role === 'open-room') {
       currentRoomId = btn.dataset.roomId;
       currentStage = 1;
+      openWalls = {}; // новое помещение — все стены свёрнуты
       renderMeasure();
       showScreen('screen-measure');
     }
@@ -791,7 +866,11 @@ function renderMeasure() {
   const s1 = room.stage1;
   const s = (currentStage === 2) ? room.stage2 : room.stage1;
   const isS2 = currentStage === 2;
-  const dis = isS2 ? ' disabled' : '';       // disabled для select-ов на ст.2
+  const locked = !!room.locked;              // ст.1 заблокирована (пункт 5)
+  // Стадия 1 после блокировки — только чтение; на ст.2 select-ы описания тоже
+  // read-only (материалы/план.толщина задаются на ст.1).
+  const lockS1 = locked && !isS2;
+  const dis = (isS2 || lockS1) ? ' disabled' : '';
 
   let html = '';
 
@@ -804,18 +883,37 @@ function renderMeasure() {
     + '<button type="button" class="stage-btn' + (isS2 ? ' is-active' : '') + '" data-role="stage" data-stage="2">Стадия 2</button>'
     + '</div>';
   html += '<button type="button" class="btn btn-sm btn-ghost" data-role="back">← К помещениям</button>';
+  // Кнопка разблокировки — ВНЕ отключаемого блока, иначе была бы тоже неактивна.
+  if (locked) {
+    html += '<button type="button" class="btn btn-sm btn-ghost" data-role="unlock" '
+      + 'title="Разблокировать редактирование стадии 1">🔓 Разблокировать ст.1</button>';
+  }
   html += '</div>';
 
-  if (isS2) {
+  if (lockS1) {
+    html += '<p class="hint hint-sm">🔒 Стадия 1 заблокирована — размеры зафиксированы. '
+      + 'Нажмите «Разблокировать ст.1», чтобы внести правки.</p>';
+  } else if (isS2) {
     html += '<p class="hint hint-sm">Стадия 2 (факт): вводите габариты после работ. '
       + 'Материалы и план.толщина заданы на ст.1; толщина здесь считается автоматически.</p>';
   }
 
+  // Оболочка для всех полей замера. Нативный disabled на <fieldset> отключает
+  // ВСЕ вложенные поля/кнопки разом — так реализуется блокировка ст.1 (пункт 5).
+  html += '<fieldset class="measure-fields"' + (lockS1 ? ' disabled' : '') + '>';
+
   // 2. Общие размеры.
   html += '<fieldset class="block"><legend>Общие размеры, мм</legend><div class="grid-3">';
-  html += dimField('Высота', 'height', s.height);
-  html += dimField('Длина А→В', 'length', s.length);
-  html += dimField('Ширина Б→Г', 'width', s.width);
+  if (isS2) {
+    // На ст.2 рядом с размером — значение из ст.1 и цветовой маркер норма/перерасход (пункт 6).
+    html += dimFieldS2('Высота', 'height', s.height, room);
+    html += dimFieldS2('Длина А→В', 'length', s.length, room);
+    html += dimFieldS2('Ширина Б→Г', 'width', s.width, room);
+  } else {
+    html += dimField('Высота', 'height', s.height);
+    html += dimField('Длина А→В', 'length', s.length);
+    html += dimField('Ширина Б→Г', 'width', s.width);
+  }
   html += '</div></fieldset>';
 
   // 3. Порядок работ (radio) — влияет на высоту стены в расчёте.
@@ -868,6 +966,8 @@ function renderMeasure() {
     + '<button class="btn btn-sm" type="button" disabled>📷 Добавить фото</button>'
     + '<span class="unit-note">скоро</span></fieldset>';
 
+  html += '</fieldset>'; // /measure-fields
+
   root.innerHTML = html;
   bindMeasureEvents(root);
 }
@@ -877,6 +977,77 @@ function dimField(label, role, value) {
   return '<div class="field"><label class="field-label">' + esc(label) + '</label>'
     + '<input class="txt" type="text" inputmode="numeric" data-role="dim" data-dim="' + role + '" '
     + 'value="' + esc(value) + '" placeholder="мм"></div>';
+}
+
+// markerDotClass(state) — класс цветного кружка по состоянию.
+//   over → красный, under → жёлтый, norm → зелёный, neutral → серый.
+function markerDotClass(state) {
+  if (state === 'over') return 'mk-over';
+  if (state === 'under') return 'mk-under';
+  if (state === 'norm') return 'mk-norm';
+  return 'mk-neutral';
+}
+
+// thickState(fact, plan) — сравнение фактической толщины с плановой по порогу (±%):
+//   plan<=0 → 'neutral'; факт выше плана более чем на порог → 'over' (перерасход);
+//   факт ниже плана более чем на порог → 'under' (недовыполнение); иначе 'norm'.
+function thickState(fact, plan) {
+  const f = mm(fact), p = mm(plan);
+  if (num(plan) <= 0) {
+    return { state: 'neutral', title: 'План.толщина не задана', note: 'факт ' + f + ' мм' };
+  }
+  const thr = thresholdPct();
+  const hi = num(plan) * (1 + thr / 100);
+  const lo = num(plan) * (1 - thr / 100);
+  if (num(fact) > hi) {
+    return { state: 'over', title: 'Перерасход: факт ' + f + ' > план ' + p + ' мм (порог ' + thr + '%)',
+      note: 'перерасход (факт ' + f + ' > план ' + p + ')' };
+  }
+  if (num(fact) < lo) {
+    return { state: 'under', title: 'Недовыполнение: факт ' + f + ' < план ' + p + ' мм (порог ' + thr + '%)',
+      note: 'мало нанесли (факт ' + f + ' < план ' + p + ')' };
+  }
+  return { state: 'norm', title: 'Норма: факт ' + f + ' ≈ план ' + p + ' мм (±' + thr + '%)',
+    note: 'норма (факт ' + f + ' ≈ план ' + p + ')' };
+}
+
+// dimMarker(dimRole, room) — состояние маркера для габарита на ст.2:
+//   height → сравниваем факт.толщину пола (Δвысот) с план.толщиной пола;
+//   length → стены А/В: факт = (len1−len2)/2 против мин. план.толщины этих стен;
+//   width  → стены Б/Г: факт = (wid1−wid2)/2 против мин. план.толщины этих стен.
+// Если материал/план не заданы — 'neutral'.
+function dimMarker(dimRole, room) {
+  const s1 = room.stage1, s2 = room.stage2;
+  if (dimRole === 'height') {
+    const floor = (s1.floor && typeof s1.floor === 'object') ? s1.floor : {};
+    if (!floor.materialId) return { state: 'neutral', title: 'Пол не задан', note: '' };
+    const fact = num(s1.height) - num(s2.height);
+    return thickState(fact, num(floor.thicknessPlan));
+  }
+  const keys = dimRole === 'length' ? ['A', 'V'] : ['B', 'G'];
+  const walls = (s1.walls && typeof s1.walls === 'object') ? s1.walls : {};
+  const present = keys.filter(function (k) { return walls[k] && walls[k].materialId; });
+  if (!present.length) return { state: 'neutral', title: 'Стены не заданы', note: '' };
+  const fact = dimRole === 'length'
+    ? (num(s1.length) - num(s2.length)) / 2
+    : (num(s1.width) - num(s2.width)) / 2;
+  let plan = Infinity;
+  present.forEach(function (k) { plan = Math.min(plan, num(walls[k].thicknessPlan)); });
+  if (!isFinite(plan)) plan = 0;
+  return thickState(fact, plan);
+}
+
+// dimFieldS2 — поле габарита на ст.2: подпись из ст.1 + цветной маркер (пункт 6).
+function dimFieldS2(label, dimRole, value, room) {
+  const ref = num(room.stage1[dimRole]);
+  const mk = dimMarker(dimRole, room);
+  const refText = 'ст.1: ' + (ref ? mm(ref) + ' мм' : '—') + (mk.note ? ' · ' + mk.note : '');
+  return '<div class="field"><label class="field-label">' + esc(label)
+    + ' <span class="thick-marker ' + markerDotClass(mk.state) + '" data-dim-marker="' + dimRole + '" '
+    + 'title="' + esc(mk.title) + '"></span></label>'
+    + '<input class="txt" type="text" inputmode="numeric" data-role="dim" data-dim="' + dimRole + '" '
+    + 'value="' + esc(value) + '" placeholder="мм">'
+    + '<span class="unit-note" data-dim-ref="' + dimRole + '">' + esc(refText) + '</span></div>';
 }
 
 // woRadio — один переключатель порядка работ.
@@ -897,7 +1068,8 @@ function renderWallBlock(room, key, isS2) {
   const openings = Array.isArray(stageWall.openings) ? stageWall.openings : [];
   const dis = isS2 ? ' disabled' : '';
 
-  let h = '<details class="wall" data-wall="' + key + '"><summary>' + esc(WALL_LABELS[key]) + '</summary>';
+  let h = '<details class="wall" data-wall="' + key + '"' + (openWalls[key] ? ' open' : '')
+    + '><summary>' + esc(WALL_LABELS[key]) + '</summary>';
   h += '<div class="wall-body">';
 
   // Материал (описание — ст.1).
@@ -944,22 +1116,67 @@ function renderWallBlock(room, key, isS2) {
   return h;
 }
 
-// renderSlopes — список откосов (данные в stage1).
+// slField — компактное числовое поле откоса (readonly → серое, не редактируется).
+function slField(label, role, id, value, readOnly) {
+  return '<div class="field"><label class="field-label">' + esc(label) + '</label>'
+    + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="' + role + '" data-id="' + esc(id) + '" '
+    + 'value="' + esc(value) + '" placeholder="мм"' + (readOnly ? ' readonly' : '') + '></div>';
+}
+
+// renderSlopeItem(sl, isS2) — карточка одного откоса.
+//   ст.1: периметр, глубина, материал, план.толщина, проём (ширина/высота) ДО работ.
+//   ст.2: описание read-only + проём ПОСЛЕ работ (редактируется) + авторасчёт
+//         фактической толщины из разницы проёма и цветной маркер (пункты 3, 6).
+function renderSlopeItem(sl, isS2) {
+  const id = sl.id;
+  const mat = materialById(sl.materialId);
+  // План.толщина: новое поле thicknessPlan с откатом на старое thickness.
+  const planThick = (sl.thicknessPlan !== undefined && sl.thicknessPlan !== '') ? sl.thicknessPlan : sl.thickness;
+
+  let h = '<div class="slope-card" data-slope-id="' + esc(id) + '">';
+  h += '<div class="slope-head"><span class="slope-title">Откос</span>';
+  if (!isS2) {
+    h += '<button class="btn-icon btn-danger" type="button" data-role="del-slope" data-id="' + esc(id) + '" title="Удалить откос">✕</button>';
+  }
+  h += '</div><div class="slope-grid">';
+
+  if (!isS2) {
+    h += slField('Периметр, мм', 'slope-perimeter', id, sl.perimeter, false);
+    h += slField('Глубина откоса, мм', 'slope-width', id, sl.width, false);
+    h += '<div class="field"><label class="field-label">Материал</label>'
+      + '<select class="sel sel-sm" data-role="slope-material" data-id="' + esc(id) + '">' + materialOptions(sl.materialId) + '</select></div>';
+    h += slField('План.толщина, мм', 'slope-thick', id, planThick, false);
+    h += slField('Проём: ширина ст.1, мм', 'slope-ow1', id, sl.openW1, false);
+    h += slField('Проём: высота ст.1, мм', 'slope-oh1', id, sl.openH1, false);
+  } else {
+    const calc = calcSlope(sl);
+    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
+    h += '<div class="field"><label class="field-label">Материал</label>'
+      + '<input class="txt txt-sm" type="text" value="' + esc(mat.name || '—') + '" readonly></div>';
+    h += slField('План.толщина, мм', 'slope-thick', id, mm(calc.plan.thickness_mm), true);
+    h += slField('Проём: ширина ст.1, мм', 'slope-ow1', id, sl.openW1, true);
+    h += slField('Проём: высота ст.1, мм', 'slope-oh1', id, sl.openH1, true);
+    h += slField('Проём: ширина ст.2, мм', 'slope-ow2', id, sl.openW2, false);
+    h += slField('Проём: высота ст.2, мм', 'slope-oh2', id, sl.openH2, false);
+    h += '<div class="field"><label class="field-label">Толщина (факт), мм '
+      + '<span class="thick-marker ' + markerDotClass(mk.state) + '" data-slope-marker="' + esc(id) + '" title="' + esc(mk.title) + '"></span></label>'
+      + '<input class="txt auto" type="text" data-slope-auto="' + esc(id) + '" value="' + esc(mm(calc.fact.thickness_mm)) + '" readonly>'
+      + '<span class="unit-note" data-slope-note="' + esc(id) + '">' + esc(mk.note) + '</span></div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+// renderSlopes — список откосов (данные в stage1). Проём ст.2 замеряется на ст.2,
+// но хранится в том же объекте откоса (единый список), поэтому редактируется и там.
 function renderSlopes(s1, isS2) {
   const slopes = Array.isArray(s1.slopes) ? s1.slopes : [];
-  const dis = isS2 ? ' disabled' : '';
   let h = '<fieldset class="block"><legend>Откосы</legend>';
-  if (isS2) h += '<p class="hint hint-sm">Откосы задаются на ст.1 (общий элемент).</p>';
+  h += '<p class="hint hint-sm">Толщина факта считается из того, насколько уменьшился '
+    + 'проём окна/двери после штукатурки (замер проёма на ст.1 и ст.2).</p>';
   if (!slopes.length) h += '<p class="hint hint-sm">Нет откосов.</p>';
-  slopes.forEach(function (sl) {
-    h += '<div class="line-item" data-slope-id="' + esc(sl.id) + '">'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="slope-perimeter" data-id="' + esc(sl.id) + '" value="' + esc(sl.perimeter) + '" placeholder="периметр, мм"' + dis + '>'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="slope-width" data-id="' + esc(sl.id) + '" value="' + esc(sl.width) + '" placeholder="ширина, мм"' + dis + '>'
-      + '<select class="sel sel-sm" data-role="slope-material" data-id="' + esc(sl.id) + '"' + dis + '>' + materialOptions(sl.materialId) + '</select>'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="slope-thick" data-id="' + esc(sl.id) + '" value="' + esc(sl.thickness) + '" placeholder="толщ., мм"' + dis + '>'
-      + '<button class="btn-icon btn-danger" type="button" data-role="del-slope" data-id="' + esc(sl.id) + '" title="Удалить откос"' + dis + '>✕</button>'
-      + '</div>';
-  });
+  slopes.forEach(function (sl) { h += renderSlopeItem(sl, isS2); });
   if (!isS2) h += '<button class="btn btn-sm" type="button" data-role="add-slope">+ Откос</button>';
   h += '</fieldset>';
   return h;
@@ -1011,6 +1228,44 @@ function updateAutoFields(root, room) {
       auto.value = mm(t);
     }
   });
+
+  // Откосы: пересчёт фактической толщины из разницы проёма + маркер (пункты 3, 6).
+  const slopes = Array.isArray(s1.slopes) ? s1.slopes : [];
+  root.querySelectorAll('[data-slope-auto]').forEach(function (el) {
+    const id = el.dataset.slopeAuto;
+    const sl = slopes.find(function (x) { return x.id === id; });
+    if (!sl) return;
+    const calc = calcSlope(sl);
+    el.value = mm(calc.fact.thickness_mm);
+    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
+    setMarker(root.querySelector('[data-slope-marker="' + cssEsc(id) + '"]'), mk);
+    const note = root.querySelector('[data-slope-note="' + cssEsc(id) + '"]');
+    if (note) note.textContent = mk.note;
+  });
+
+  // Маркеры габаритов (высота/длина/ширина) — норма/перерасход по толщине.
+  root.querySelectorAll('[data-dim-marker]').forEach(function (el) {
+    const dimRole = el.dataset.dimMarker;
+    const mk = dimMarker(dimRole, room);
+    setMarker(el, mk);
+    const ref = num(room.stage1[dimRole]);
+    const note = root.querySelector('[data-dim-ref="' + cssEsc(dimRole) + '"]');
+    if (note) note.textContent = 'ст.1: ' + (ref ? mm(ref) + ' мм' : '—') + (mk.note ? ' · ' + mk.note : '');
+  });
+}
+
+// setMarker(el, mk) — перекрасить кружок-маркер и обновить подсказку.
+function setMarker(el, mk) {
+  if (!el) return;
+  el.classList.remove('mk-over', 'mk-under', 'mk-norm', 'mk-neutral');
+  el.classList.add(markerDotClass(mk.state));
+  el.title = mk.title;
+}
+
+// cssEsc(s) — экранирование значения для селектора [attr="..."] (id-шники uuid
+// безопасны, но кавычки на всякий случай экранируем).
+function cssEsc(s) {
+  return String(s == null ? '' : s).replace(/"/g, '\\"');
 }
 
 // bindMeasureEvents — обработчики экрана 2. Навешиваются ОДИН раз на постоянный
@@ -1020,6 +1275,16 @@ function updateAutoFields(root, room) {
 function bindMeasureEvents(root) {
   if (root._measureBound) return;
   root._measureBound = true;
+
+  // Запоминаем, какие стены раскрыты. Событие 'toggle' не всплывает, поэтому
+  // слушаем на фазе перехвата (третий аргумент true) — так один слушатель на
+  // #measure-root ловит открытие/закрытие любой вложенной <details class="wall">.
+  root.addEventListener('toggle', function (ev) {
+    const d = ev.target;
+    if (d && d.classList && d.classList.contains('wall')) {
+      openWalls[d.dataset.wall] = d.open;
+    }
+  }, true);
 
   // ctx() — актуальный контекст: комната, редактируемая стадия, ст.1.
   function ctx() {
@@ -1057,10 +1322,14 @@ function bindMeasureEvents(root) {
       const arr = stageWalls[el.dataset.wall].openings;
       const op = arr[Number(el.dataset.idx)];
       if (op) op[role === 'op-w' ? 'w' : 'h'] = el.value;
-    } else if (role === 'slope-perimeter' || role === 'slope-width' || role === 'slope-thick') {
+    } else if (role === 'slope-perimeter' || role === 'slope-width' || role === 'slope-thick'
+            || role === 'slope-ow1' || role === 'slope-oh1' || role === 'slope-ow2' || role === 'slope-oh2') {
       const sl = s1.slopes.find(function (x) { return x.id === el.dataset.id; });
       if (sl) {
-        const map = { 'slope-perimeter': 'perimeter', 'slope-width': 'width', 'slope-thick': 'thickness' };
+        const map = {
+          'slope-perimeter': 'perimeter', 'slope-width': 'width', 'slope-thick': 'thicknessPlan',
+          'slope-ow1': 'openW1', 'slope-oh1': 'openH1', 'slope-ow2': 'openW2', 'slope-oh2': 'openH2'
+        };
         sl[map[role]] = el.value;
       }
     } else if (role === 'col-perimeter' || role === 'col-height' || role === 'col-thick') {
@@ -1120,7 +1389,20 @@ function bindMeasureEvents(root) {
 
     // stage/back не требуют контекста комнаты.
     if (role === 'stage') {
-      currentStage = (btn.dataset.stage === '2') ? 2 : 1;
+      const target = (btn.dataset.stage === '2') ? 2 : 1;
+      // Первый переход на ст.2 — подтверждение и блокировка ст.1 (пункт 5).
+      if (target === 2) {
+        const c0 = ctx();
+        if (c0 && !c0.room.locked) {
+          const ok = confirm('Все размеры Стадии 1 внесены?\n\n'
+            + 'После перехода к Стадии 2 изменить их будет нельзя '
+            + '(при необходимости можно разблокировать вручную).');
+          if (!ok) return;
+          c0.room.locked = true;
+          save();
+        }
+      }
+      currentStage = target;
       renderMeasure();
       return;
     } else if (role === 'back') {
@@ -1133,7 +1415,11 @@ function bindMeasureEvents(root) {
     if (!c) return;
     const room = c.room, s1 = c.s1;
 
-    if (role === 'add-opening') {
+    if (role === 'unlock') {
+      room.locked = false;
+      save();
+      renderMeasure();
+    } else if (role === 'add-opening') {
       const stageWalls = (currentStage === 2 ? room.stage2 : s1).walls;
       stageWalls[btn.dataset.wall].openings.push({ type: 'window', w: '', h: '' });
       persist();
@@ -1142,7 +1428,10 @@ function bindMeasureEvents(root) {
       stageWalls[btn.dataset.wall].openings.splice(Number(btn.dataset.idx), 1);
       persist();
     } else if (role === 'add-slope') {
-      s1.slopes.push({ id: uuid(), perimeter: '', width: '', materialId: '', thickness: '' });
+      s1.slopes.push({
+        id: uuid(), perimeter: '', width: '', materialId: '', thicknessPlan: '',
+        openW1: '', openH1: '', openW2: '', openH2: ''
+      });
       persist();
     } else if (role === 'del-slope') {
       s1.slopes = s1.slopes.filter(function (x) { return x.id !== btn.dataset.id; });
@@ -1212,6 +1501,12 @@ function renderComparison() {
   // 1. Оффлайн-индикатор (sticky).
   html += onlineBannerHTML();
 
+  // 1b. Панель действий: справочник «Коэффициенты расхода» (пункт 2).
+  html += '<div class="cmp-toolbar">'
+    + '<button class="btn btn-sm" type="button" data-role="open-materials" '
+    + 'title="Нормы расхода, цены и сметы материалов">⚙ Коэффициенты расхода</button>'
+    + '</div>';
+
   // 2. Пустой проект — дружелюбная подсказка вместо таблицы с NaN.
   if (!hasData) {
     html += '<p class="hint">Добавьте помещения и замеры — здесь появится сравнение '
@@ -1257,9 +1552,20 @@ function reportButtonHTML() {
     + '</div>';
 }
 
-// deltaCellClass(overrun) — класс подсветки перерасхода.
+// deltaCellClass(overrun) — класс подсветки перерасхода (используется в таблице
+// поверхностей, где порог не применяется — там любой перерасход красный).
 function deltaCellClass(overrun) {
   return overrun ? ' cmp-overrun' : '';
+}
+
+// flagRowClass(x) — класс строки по зоне отклонения: значимый перерасход → красная,
+// значимый недорасход → жёлтая, иначе — обычная (x = материал/итог с alert/undershoot).
+function flagRowClass(x) {
+  return (x && x.alert) ? ' row-alert' : ((x && x.undershoot) ? ' row-under' : '');
+}
+// flagCellClass(x) — класс числовой ячейки (цвет цифр) по той же зоне.
+function flagCellClass(x) {
+  return (x && x.alert) ? ' cmp-alert' : ((x && x.undershoot) ? ' cmp-under' : '');
 }
 
 // renderDesktopTable(data) — полная таблица материалов (видна на десктопе).
@@ -1273,27 +1579,27 @@ function renderDesktopTable(data) {
     + '</tr></thead><tbody>';
 
   data.materials.forEach(function (m) {
-    h += '<tr class="' + (m.overrun ? 'row-overrun' : '') + '">'
+    h += '<tr class="' + flagRowClass(m).trim() + '">'
       + '<td>' + esc(m.materialName) + '</td>'
       + '<td class="num">' + fmtT(m.budget_t) + '</td>'
       + '<td class="num">' + fmtT(m.plan_t) + '</td>'
       + '<td class="num">' + fmtT(m.fact_t) + '</td>'
-      + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
-      + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
-      + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.percent, fmtPct) + '</td>'
-      + '<td>—</td>'
+      + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
+      + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
+      + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.percent, fmtPct) + '</td>'
+      + '<td>' + (m.responsible ? esc(m.responsible) : '—') + '</td>'
       + '</tr>';
   });
 
   // Итоговая строка по объекту.
   const t = data.totals;
-  h += '<tr class="cmp-total' + (t.delta_t < 0 ? ' row-overrun' : '') + '">'
+  h += '<tr class="cmp-total' + flagRowClass(t) + '">'
     + '<td>Итого по объекту</td>'
     + '<td class="num">—</td>'
     + '<td class="num">' + fmtT(t.plan_t) + '</td>'
     + '<td class="num">' + fmtT(t.fact_t) + '</td>'
-    + '<td class="num' + deltaCellClass(t.delta_t < 0) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
-    + '<td class="num' + deltaCellClass(t.delta_t < 0) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
+    + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
+    + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
     + '<td class="num">—</td>'
     + '<td>—</td>'
     + '</tr>';
@@ -1336,38 +1642,37 @@ function renderMobileTabs(data) {
   h += '</tr></thead><tbody>';
 
   data.materials.forEach(function (m) {
-    const oc = m.overrun ? ' row-overrun' : '';
+    const oc = flagRowClass(m);
     h += '<tr class="' + oc.trim() + '">';
     if (compareTab === 'plan') {
       h += '<td>' + esc(m.materialName) + '</td>'
         + '<td class="num">' + fmtT(m.budget_t) + '</td>'
         + '<td class="num">' + fmtT(m.plan_t) + '</td>'
-        + '<td>—</td>';
+        + '<td>' + (m.responsible ? esc(m.responsible) : '—') + '</td>';
     } else if (compareTab === 'fact') {
       h += '<td>' + esc(m.materialName) + '</td>'
         + '<td class="num">' + fmtT(m.fact_t) + '</td>'
-        + '<td>—</td>';
+        + '<td>' + (m.responsible ? esc(m.responsible) : '—') + '</td>';
     } else {
       h += '<td>' + esc(m.materialName) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.percent, fmtPct) + '</td>';
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.percent, fmtPct) + '</td>';
     }
     h += '</tr>';
   });
 
   // Итог по объекту (адаптирован под вкладку).
   const t = data.totals;
-  const totalOverrun = t.delta_t < 0;
-  h += '<tr class="cmp-total' + (totalOverrun ? ' row-overrun' : '') + '">';
+  h += '<tr class="cmp-total' + flagRowClass(t) + '">';
   if (compareTab === 'plan') {
     h += '<td>Итого</td><td class="num">—</td><td class="num">' + fmtT(t.plan_t) + '</td><td>—</td>';
   } else if (compareTab === 'fact') {
     h += '<td>Итого</td><td class="num">' + fmtT(t.fact_t) + '</td><td>—</td>';
   } else {
     h += '<td>Итого</td>'
-      + '<td class="num' + deltaCellClass(totalOverrun) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
-      + '<td class="num' + deltaCellClass(totalOverrun) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
+      + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
+      + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
       + '<td class="num">—</td>';
   }
   h += '</tr>';
@@ -1436,13 +1741,13 @@ function renderRoomBreakdown(room) {
       + '<th class="num">Δт</th><th class="num">Δ₽</th><th class="num">%</th>'
       + '</tr></thead><tbody>';
     room.byMaterial.forEach(function (m) {
-      h += '<tr class="' + (m.overrun ? 'row-overrun' : '') + '">'
+      h += '<tr class="' + flagRowClass(m).trim() + '">'
         + '<td>' + esc(m.materialName) + '</td>'
         + '<td class="num">' + fmtT(m.plan_t) + '</td>'
         + '<td class="num">' + fmtT(m.fact_t) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
-        + '<td class="num' + deltaCellClass(m.overrun) + '">' + fmtSigned(m.percent, fmtPct) + '</td>'
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_t, fmtT) + '</td>'
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.delta_rub, fmtRub) + '</td>'
+        + '<td class="num' + flagCellClass(m) + '">' + fmtSigned(m.percent, fmtPct) + '</td>'
         + '</tr>';
     });
     h += '</tbody></table>';
@@ -1490,6 +1795,8 @@ function bindComparisonEvents(root) {
     if (role === 'cmp-tab') {
       compareTab = el.dataset.tab || 'plan';
       renderComparison();
+    } else if (role === 'open-materials') {
+      openMaterialsModal();
     }
     // role === 'report' — обработчик добавит Ф5 (AI/Telegram).
   });
@@ -1503,6 +1810,145 @@ function bindComparisonEvents(root) {
     window.addEventListener('online', rerender);
     window.addEventListener('offline', rerender);
   }
+}
+
+// ============================================================================
+// СПРАВОЧНИК МАТЕРИАЛОВ — окно «Коэффициенты расхода» (пункт 2).
+// Редактирование норм (коэффициент расхода), цен и сметы. Правки сразу пишутся
+// в state.materials и пересчитывают экран «Сравнение» за окном.
+// ============================================================================
+let materialsModalEls = null; // { overlay, body }
+
+function ensureMaterialsModal() {
+  if (materialsModalEls) return materialsModalEls;
+
+  const overlay = document.createElement('div');
+  overlay.className = 'ai-modal-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.hidden = true;
+
+  const box = document.createElement('div');
+  box.className = 'ai-modal';
+
+  const head = document.createElement('div');
+  head.className = 'ai-modal-head';
+  head.innerHTML = '<span class="ai-modal-title">Коэффициенты расхода</span>';
+
+  const closeBtn = document.createElement('button');
+  closeBtn.type = 'button';
+  closeBtn.className = 'ai-modal-close';
+  closeBtn.setAttribute('aria-label', 'Закрыть');
+  closeBtn.textContent = '✕';
+  head.appendChild(closeBtn);
+
+  const body = document.createElement('div');
+  body.className = 'ai-modal-body';
+
+  box.appendChild(head);
+  box.appendChild(body);
+  overlay.appendChild(box);
+  document.body.appendChild(overlay);
+
+  closeBtn.addEventListener('click', closeMaterialsModal);
+  overlay.addEventListener('click', function (ev) { if (ev.target === overlay) closeMaterialsModal(); });
+  document.addEventListener('keydown', function (ev) {
+    if (ev.key === 'Escape' && !overlay.hidden) closeMaterialsModal();
+  });
+
+  materialsModalEls = { overlay: overlay, body: body };
+  bindMaterialsModalEvents(body);
+  return materialsModalEls;
+}
+
+// renderMaterialsModalBody() — таблица материалов с полями ввода.
+function renderMaterialsModalBody() {
+  const m = ensureMaterialsModal();
+  let h = '<p class="hint hint-sm">Норма (коэффициент расхода) — сколько кг материала уходит '
+    + 'на 1 м² при толщине 1 см. Цена — за тонну. Смета — плановый объём по договору.</p>';
+
+  // Порог значимого отклонения (общий на объект).
+  h += '<div class="field mat-threshold"><label class="field-label">Порог значимого отклонения, %</label>'
+    + '<input class="txt txt-sm mat-num" type="text" inputmode="decimal" data-role="mat-threshold" '
+    + 'value="' + esc(thresholdPct()) + '">'
+    + '<span class="unit-note">Отклонение меньше порога — норма (🟢). Перерасход выше — тревога (🔴), '
+    + 'крупный недорасход — «проверить» (🟡). 0 — реагировать на любое отклонение.</span></div>';
+  h += '<table class="cmp-table cmp-table-sub mat-table"><thead><tr>'
+    + '<th>Материал</th><th class="num">Норма</th><th class="num">Цена, ₽/т</th>'
+    + '<th class="num">Смета, т</th><th></th></tr></thead><tbody>';
+  (state.materials || []).forEach(function (mat) {
+    h += '<tr>'
+      + '<td><input class="txt txt-sm" type="text" data-role="mat-name" data-id="' + esc(mat.id) + '" value="' + esc(mat.name) + '"></td>'
+      + '<td><input class="txt txt-sm mat-num" type="text" inputmode="decimal" data-role="mat-norm" data-id="' + esc(mat.id) + '" value="' + esc(mat.norm) + '"></td>'
+      + '<td><input class="txt txt-sm mat-num" type="text" inputmode="numeric" data-role="mat-price" data-id="' + esc(mat.id) + '" value="' + esc(mat.price) + '"></td>'
+      + '<td><input class="txt txt-sm mat-num" type="text" inputmode="decimal" data-role="mat-budget" data-id="' + esc(mat.id) + '" value="' + esc(mat.budget) + '"></td>'
+      + '<td><button class="btn-icon btn-danger" type="button" data-role="mat-del" data-id="' + esc(mat.id) + '" title="Удалить материал">✕</button></td>'
+      + '</tr>';
+  });
+  h += '</tbody></table>';
+  h += '<button class="btn btn-sm" type="button" data-role="mat-add">+ Материал</button>';
+  m.body.innerHTML = h;
+}
+
+// bindMaterialsModalEvents(body) — обработчики окна (навешиваются один раз).
+function bindMaterialsModalEvents(body) {
+  function findMat(id) { return (state.materials || []).find(function (x) { return x.id === id; }); }
+
+  body.addEventListener('input', function (ev) {
+    const el = ev.target.closest('[data-role]');
+    if (!el) return;
+    // Порог — общий (без data-id), обрабатываем до поиска материала.
+    if (el.dataset.role === 'mat-threshold') {
+      if (!state.settings) state.settings = defaultSettings();
+      state.settings.overrunThresholdPct = Math.max(0, num(el.value));
+      save();
+      if (typeof renderComparison === 'function') renderComparison();
+      return;
+    }
+    const mat = findMat(el.dataset.id);
+    if (!mat) return;
+    const role = el.dataset.role;
+    if (role === 'mat-name') mat.name = el.value;
+    else if (role === 'mat-norm') mat.norm = num(el.value);
+    else if (role === 'mat-price') mat.price = num(el.value);
+    else if (role === 'mat-budget') mat.budget = num(el.value);
+    else return;
+    save();
+    // Пересчитываем «Сравнение» за окном, но НЕ перерисовываем тело окна —
+    // иначе поле ввода потеряет фокус/каретку прямо во время набора.
+    if (typeof renderComparison === 'function') renderComparison();
+  });
+
+  body.addEventListener('click', function (ev) {
+    const el = ev.target.closest('[data-role]');
+    if (!el) return;
+    const role = el.dataset.role;
+    if (role === 'mat-del') {
+      const mat = findMat(el.dataset.id);
+      if (mat && confirm('Удалить материал «' + mat.name + '» из справочника?')) {
+        state.materials = state.materials.filter(function (x) { return x.id !== el.dataset.id; });
+        save();
+        renderMaterialsModalBody();
+        if (typeof renderComparison === 'function') renderComparison();
+      }
+    } else if (role === 'mat-add') {
+      state.materials.push({ id: uuid(), name: 'Новый материал', norm: 0, price: 0, budget: 0 });
+      save();
+      renderMaterialsModalBody();
+    }
+  });
+}
+
+function openMaterialsModal() {
+  ensureMaterialsModal();
+  renderMaterialsModalBody();
+  materialsModalEls.overlay.hidden = false;
+  document.body.classList.add('ai-modal-open');
+}
+function closeMaterialsModal() {
+  if (!materialsModalEls) return;
+  materialsModalEls.overlay.hidden = true;
+  document.body.classList.remove('ai-modal-open');
 }
 
 if (typeof module !== 'undefined') {
@@ -1638,6 +2084,27 @@ if (typeof module !== 'undefined' && require.main === module) {
   assertClose('проект перерасход overrun', screed.overrun ? 1 : 0, 1);
   assertClose('проект смета budget_t', screed.budget_t, 3);
   assertClose('проект итог Δт', proj.totals.delta_t, -0.8);
+
+  console.log('--- Тест 7: порог значимости отклонения (двусторонний) ---');
+  // Объект из теста 6: перерасход 0.8 т при плане 2.4 = 33%.
+  state.settings = { overrunThresholdPct: 5 };
+  const proj7 = calcProject();
+  const scr7 = proj7.materials.find(function (m) { return m.materialId === 'screed_c'; });
+  assertClose('порог 5%: alert при 33% перерасходе', scr7.alert ? 1 : 0, 1);
+  assertClose('порог 5%: undershoot=false', scr7.undershoot ? 1 : 0, 0);
+  // Порог выше отклонения → перерасход есть, но незначимый (alert=false).
+  state.settings = { overrunThresholdPct: 50 };
+  const proj7b = calcProject();
+  const scr7b = proj7b.materials.find(function (m) { return m.materialId === 'screed_c'; });
+  assertClose('порог 50%: alert=false (33% < 50%)', scr7b.alert ? 1 : 0, 0);
+  assertClose('порог 50%: overrun всё ещё true', scr7b.overrun ? 1 : 0, 1);
+  // Флаги напрямую: недорасход и «план=0, факт>0».
+  state.settings = { overrunThresholdPct: 10 };
+  const uf = deviationFlags(2.0, 1.0, 1.0);      // план 2, факт 1 → недорасход 50%
+  assertClose('недорасход 50% > порог → undershoot', uf.undershoot ? 1 : 0, 1);
+  assertClose('недорасход → overrun=false', uf.overrun ? 1 : 0, 0);
+  const zf = deviationFlags(0, 0.5, -0.5);        // план 0, факт 0.5 → ∞% → alert
+  assertClose('план 0 при факте>0 → alert', zf.alert ? 1 : 0, 1);
 
   console.log('\n=== ИТОГО: passed=' + passed + ', failed=' + failed + ' ===');
   process.exit(failed === 0 ? 0 : 1);

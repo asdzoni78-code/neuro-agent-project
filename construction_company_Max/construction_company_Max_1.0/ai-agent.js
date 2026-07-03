@@ -69,33 +69,36 @@ function logDev(tag, err) {
 // overruns отсортированы по величине Δ₽ (самый дорогой перерасход — первым).
 function collectOverruns() {
   var data = (typeof calcProject === 'function') ? calcProject() : { materials: [], rooms: [], totals: {}, projectName: '' };
-  var overruns = [];
+  var overruns = [];    // значимый перерасход (m.alert) — «лишние деньги»
+  var undershoots = []; // значимый недорасход (m.undershoot) — «проверить»
 
   (data.rooms || []).forEach(function (room) {
     (room.byMaterial || []).forEach(function (m) {
-      if (m.overrun && m.delta_t < 0) {
-        overruns.push({
-          floor: room.floorName || '',
-          room: room.roomName || 'Помещение',
-          responsible: room.responsible || 'не указан',
-          material: m.materialName || '',
-          plan_t: m.plan_t,
-          fact_t: m.fact_t,
-          delta_t: m.delta_t,          // < 0
-          delta_rub: m.delta_rub,      // < 0
-          percent: m.percent           // < 0
-        });
-      }
+      var rec = {
+        floor: room.floorName || '',
+        room: room.roomName || 'Помещение',
+        responsible: room.responsible || 'не указан',
+        material: m.materialName || '',
+        plan_t: m.plan_t,
+        fact_t: m.fact_t,
+        delta_t: m.delta_t,
+        delta_rub: m.delta_rub,
+        percent: m.percent
+      };
+      if (m.alert) overruns.push(rec);
+      else if (m.undershoot) undershoots.push(rec);
     });
   });
 
-  // Самый дорогой перерасход первым (по модулю Δ₽).
+  // Самый дорогой перерасход первым (Δ₽ < 0, по модулю); недорасход — крупнейший первым (percent > 0).
   overruns.sort(function (a, b) { return a.delta_rub - b.delta_rub; });
+  undershoots.sort(function (a, b) { return b.percent - a.percent; });
 
   return {
     projectName: data.projectName || 'Объект',
     date: formatDateRu(new Date()),
     overruns: overruns,
+    undershoots: undershoots,
     materials: data.materials || [],
     totals: data.totals || { plan_t: 0, fact_t: 0, delta_t: 0, delta_rub: 0 },
     hasData: (data.materials || []).length > 0
@@ -144,9 +147,9 @@ function buildPrompt(info) {
   lines.push('ОБЪЕКТ: ' + info.projectName + ' | ДАТА: ' + info.date);
   lines.push('');
   if (!info.overruns.length) {
-    lines.push('Перерасхода нет: факт по всем материалам в пределах плана.');
+    lines.push('Значимого перерасхода нет: факт по всем материалам в пределах допуска (порога).');
   } else {
-    lines.push('ПЕРЕРАСХОД (факт больше плана):');
+    lines.push('ПЕРЕРАСХОД (факт больше плана сверх порога):');
     info.overruns.forEach(function (o) {
       var where = o.room + (o.floor ? ' (' + o.floor + ')' : '');
       lines.push('- ' + where + ' / ' + o.material + ': план ' + t3(o.plan_t)
@@ -158,9 +161,23 @@ function buildPrompt(info) {
       + t3(info.totals.fact_t) + ' т, перерасход ' + t3(Math.abs(info.totals.delta_t))
       + ' т на ' + rub(Math.abs(info.totals.delta_rub)) + ' ₽.');
   }
+
+  // Крупный недорасход — отдельным блоком «проверить» (факт заметно меньше плана).
+  if (info.undershoots && info.undershoots.length) {
+    lines.push('');
+    lines.push('ПРОВЕРИТЬ — НЕДОВЫПОЛНЕНИЕ (факт заметно меньше плана: не доложили материал или не сделали работу?):');
+    info.undershoots.forEach(function (o) {
+      var where = o.room + (o.floor ? ' (' + o.floor + ')' : '');
+      lines.push('- ' + where + ' / ' + o.material + ': план ' + t3(o.plan_t)
+        + ' т, факт ' + t3(o.fact_t) + ' т, недорасход ' + t3(Math.abs(o.delta_t)) + ' т ('
+        + pct(o.percent) + '). Ответственный: ' + o.responsible + '.');
+    });
+  }
+
   lines.push('');
   lines.push('Структура отчёта:');
   lines.push('ПЕРЕРАСХОД: по строке на помещение/материал (план → факт, −Δт (−%), ответственный).');
+  lines.push('ПРОВЕРИТЬ: по строке на недовыполнение (план → факт, недорасход, ответственный) — если есть.');
   lines.push('ОЦЕНКА: 2-3 предложения — что происходит, насколько серьёзно.');
   lines.push('РЕКОМЕНДАЦИИ: 1-3 конкретных действия.');
   return lines.join('\n');
@@ -175,7 +192,7 @@ function buildFallbackReport(info) {
   lines.push('');
   lines.push('ПЕРЕРАСХОД:');
   if (!info.overruns.length) {
-    lines.push('• Перерасхода не выявлено — факт в пределах плана.');
+    lines.push('• Значимого перерасхода не выявлено — факт в пределах допуска.');
   } else {
     info.overruns.forEach(function (o) {
       var where = o.room + (o.floor ? ' (' + o.floor + ')' : '');
@@ -187,12 +204,33 @@ function buildFallbackReport(info) {
     lines.push('ИТОГО: перерасход ' + t3(Math.abs(info.totals.delta_t)) + ' т на '
       + rub(Math.abs(info.totals.delta_rub)) + ' ₽ по объекту.');
   }
+
+  if (info.undershoots && info.undershoots.length) {
+    lines.push('');
+    lines.push('ПРОВЕРИТЬ (факт заметно меньше плана — доложен ли материал / сделана ли работа):');
+    info.undershoots.forEach(function (o) {
+      var where = o.room + (o.floor ? ' (' + o.floor + ')' : '');
+      lines.push('• ' + where + ' / ' + o.material + ': план ' + t3(o.plan_t)
+        + ' т → факт ' + t3(o.fact_t) + ' т, недорасход ' + t3(Math.abs(o.delta_t)) + ' т ('
+        + pct(o.percent) + ') | Ответственный: ' + o.responsible);
+    });
+  }
   return lines.join('\n');
 }
 
 // buildAlert(info) — короткое сообщение 1 (алерт) по топ-1 проблеме (SPEC).
 function buildAlert(info) {
   if (!info.overruns.length) {
+    // Перерасхода нет, но крупный недорасход — тоже сигнал (не доложили / не сделали).
+    if (info.undershoots && info.undershoots.length) {
+      var u = info.undershoots[0];
+      var wu = u.room + (u.floor ? ', ' + u.floor : '');
+      return '🟡 Объект ' + info.projectName + ': значимого перерасхода нет, но есть недовыполнение.\n'
+        + 'Материал: ' + u.material + '\n'
+        + 'Помещение: ' + wu + ', факт меньше плана на ' + t3(Math.abs(u.delta_t)) + ' т (' + pct(u.percent) + ')\n'
+        + 'Проверьте: доложен ли материал / сделана ли работа. Ответственный: ' + u.responsible + '\n'
+        + 'Полный отчёт ниже ↓';
+    }
     return '✅ Объект ' + info.projectName + ': перерасхода нет.\nПолный отчёт ниже ↓';
   }
   var top = info.overruns[0];
