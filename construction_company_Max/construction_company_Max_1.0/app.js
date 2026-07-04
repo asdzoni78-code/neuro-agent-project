@@ -269,7 +269,10 @@ function calcWall(room, wallKey) {
   const planWidth = isAV ? num(s1.length) : num(s1.width); // ширина стены по ст.1
   const planGross = (planHeight * planWidth) / 1000000;
   const planOpen = openingsArea(walls1);
-  const planNet = planGross - planOpen;
+  // Чистая площадь не может быть отрицательной: если проёмы (по ошибке ввода)
+  // больше самой стены — обнуляем, иначе получаются отрицательные тонны, которые
+  // маскируют перерасход по всему материалу. Проверку «проём > стены» ловит валидация (Ф10).
+  const planNet = Math.max(0, planGross - planOpen);
   const planThickness_mm = num(wall.thicknessPlan);
 
   // -------- ФАКТ (стадия 2) --------
@@ -280,7 +283,7 @@ function calcWall(room, wallKey) {
   const factGross = (factHeight * factWidth) / 1000000;
   const walls2 = (s2.walls && typeof s2.walls === 'object') ? s2.walls : walls1;
   const factOpen = openingsArea(walls2);
-  const factNet = factGross - factOpen;
+  const factNet = Math.max(0, factGross - factOpen); // не даём площади уйти в минус (см. planNet)
   // Толщина факта = половина разницы противоположных стен (наносится с двух сторон).
   const factThickness_mm = isAV
     ? (num(s1.length) - num(s2.length)) / 2
@@ -1591,15 +1594,18 @@ function renderDesktopTable(data) {
       + '</tr>';
   });
 
-  // Итоговая строка по объекту.
+  // Итоговая строка по объекту (пункт 16): тонны РАЗНЫХ материалов складывать
+  // нельзя (это разные вещества) — поэтому т/Δт/% по объекту не выводим,
+  // итог по объекту имеет смысл только в рублях (₽ складываются).
   const t = data.totals;
-  h += '<tr class="cmp-total' + flagRowClass(t) + '">'
-    + '<td>Итого по объекту</td>'
+  const moneyOverrun = num(t.delta_rub) < 0; // чистый перерасход в деньгах → красный
+  h += '<tr class="cmp-total">'
+    + '<td>Итого по объекту (только ₽)</td>'
     + '<td class="num">—</td>'
-    + '<td class="num">' + fmtT(t.plan_t) + '</td>'
-    + '<td class="num">' + fmtT(t.fact_t) + '</td>'
-    + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
-    + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
+    + '<td class="num">—</td>'
+    + '<td class="num">—</td>'
+    + '<td class="num">—</td>'
+    + '<td class="num' + (moneyOverrun ? ' cmp-alert' : '') + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
     + '<td class="num">—</td>'
     + '<td>—</td>'
     + '</tr>';
@@ -1662,17 +1668,19 @@ function renderMobileTabs(data) {
     h += '</tr>';
   });
 
-  // Итог по объекту (адаптирован под вкладку).
+  // Итог по объекту (пункт 16): тонны разных материалов не суммируем —
+  // на вкладках «План»/«Факт» тонн-итога нет; итог по объекту только в ₽ («Расхождение»).
   const t = data.totals;
-  h += '<tr class="cmp-total' + flagRowClass(t) + '">';
+  const moneyOverrun = num(t.delta_rub) < 0;
+  h += '<tr class="cmp-total">';
   if (compareTab === 'plan') {
-    h += '<td>Итого</td><td class="num">—</td><td class="num">' + fmtT(t.plan_t) + '</td><td>—</td>';
+    h += '<td>Итого</td><td class="num">—</td><td class="num">—</td><td>—</td>';
   } else if (compareTab === 'fact') {
-    h += '<td>Итого</td><td class="num">' + fmtT(t.fact_t) + '</td><td>—</td>';
+    h += '<td>Итого</td><td class="num">—</td><td>—</td>';
   } else {
-    h += '<td>Итого</td>'
-      + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_t, fmtT) + '</td>'
-      + '<td class="num' + flagCellClass(t) + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
+    h += '<td>Итого (только ₽)</td>'
+      + '<td class="num">—</td>'
+      + '<td class="num' + (moneyOverrun ? ' cmp-alert' : '') + '">' + fmtSigned(t.delta_rub, fmtRub) + '</td>'
       + '<td class="num">—</td>';
   }
   h += '</tr>';
@@ -2105,6 +2113,22 @@ if (typeof module !== 'undefined' && require.main === module) {
   assertClose('недорасход → overrun=false', uf.overrun ? 1 : 0, 0);
   const zf = deviationFlags(0, 0.5, -0.5);        // план 0, факт 0.5 → ∞% → alert
   assertClose('план 0 при факте>0 → alert', zf.alert ? 1 : 0, 1);
+
+  console.log('--- Тест 8: проём больше стены → площадь не уходит в минус (баг #15) ---');
+  const roomBadOpening = {
+    stage1: {
+      height: 2600, length: 5000, width: 3000, workOrder: 'plaster_first',
+      walls: { A: { materialId: 'plaster_c', thicknessPlan: 30, openings: [] } }
+    },
+    stage2: {
+      height: 2600, length: 4900, width: 3000, workOrder: 'plaster_first',
+      walls: { A: { openings: [{ type: 'window', w: 2490, h: 14960 }] } } // опечатка: окно 15 м
+    }
+  };
+  const wBad = calcWall(roomBadOpening, 'A');
+  assertClose('стена: net факт не отрицателен', wBad.fact.net_area_m2 >= 0 ? 1 : 0, 1);
+  assertClose('стена: расход факт не отрицателен', wBad.fact.consumption_t >= 0 ? 1 : 0, 1);
+  assertClose('стена: net факт = 0 при огромном проёме', wBad.fact.net_area_m2, 0);
 
   console.log('\n=== ИТОГО: passed=' + passed + ', failed=' + failed + ' ===');
   process.exit(failed === 0 ? 0 : 1);
