@@ -405,6 +405,13 @@ body {
 /* Итоговая строка. */
 .cmp-total td { font-weight: 700; border-top: 2px solid var(--border); background: var(--bg); }
 
+/* Таблица «помещения × поверхности» (пункт 14). */
+.cmp-rooms { margin-top: var(--gap-lg); }
+.cmp-section-title { font-weight: 600; margin-bottom: var(--gap-sm); }
+.cmp-rooms-scroll { overflow-x: auto; }
+.cmp-rooms-table { min-width: 520px; }
+.cmp-floor-tag { font-size: var(--fs-sm); color: var(--text-muted); font-weight: 400; }
+
 /* --- Таблица разбивки (вложенная) --- */
 .cmp-table-sub { font-size: var(--fs-sm); margin: var(--gap-sm) 0; }
 .cmp-table-sub th, .cmp-table-sub td { padding: 6px var(--gap-sm); }

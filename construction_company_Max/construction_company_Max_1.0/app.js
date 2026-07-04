@@ -1901,6 +1901,9 @@ function renderComparison() {
   html += renderMobileTabs(data);
   html += renderDesktopTable(data);
 
+  // 4b. Таблица «помещения × поверхности» — точечно, где проблема (пункт 14).
+  html += renderRoomSurfaceTable(data);
+
   // 5. Аккордеон-разбивка по этажам/помещениям/поверхностям.
   html += renderBreakdown(data);
 
@@ -1909,6 +1912,50 @@ function renderComparison() {
 
   root.innerHTML = html;
   bindComparisonEvents(root);
+}
+
+// renderRoomSurfaceTable(data) — таблица «помещения × поверхности» (пункт 14).
+// Строки — помещения; столбцы — Пол / Стены / Откосы / Колонны. В ячейке Δт
+// (план − факт) с цветом по порогу: перерасход → красный, крупный недорасход →
+// жёлтый. Помогает точечно увидеть, где именно проблема.
+function renderRoomSurfaceTable(data) {
+  if (!data.rooms.length) return '';
+  const TYPES = [['floor', 'Пол'], ['wall', 'Стены'], ['slope', 'Откосы'], ['column', 'Колонны']];
+
+  let h = '<div class="cmp-rooms"><div class="cmp-section-title">По помещениям и поверхностям</div>';
+  h += '<div class="cmp-rooms-scroll"><table class="cmp-table cmp-rooms-table"><thead><tr>';
+  h += '<th>Помещение</th>';
+  TYPES.forEach(function (t) { h += '<th class="num">' + esc(t[1]) + ', Δт</th>'; });
+  h += '<th>Ответственный</th></tr></thead><tbody>';
+
+  data.rooms.forEach(function (rm) {
+    const found = rm.roomId ? findRoom(rm.roomId) : null;
+    const agg = {}; // тип поверхности -> { plan, fact }
+    if (found) {
+      calcRoom(found.room).surfaces.forEach(function (surf) {
+        const t = surf.surface;
+        if (!agg[t]) agg[t] = { plan: 0, fact: 0 };
+        agg[t].plan += num(surf.plan && surf.plan.consumption_t);
+        agg[t].fact += num(surf.fact && surf.fact.consumption_t);
+      });
+    }
+
+    h += '<tr><td>' + esc(rm.roomName || 'Помещение')
+      + (rm.floorName ? ' <span class="cmp-floor-tag">' + esc(rm.floorName) + '</span>' : '') + '</td>';
+    TYPES.forEach(function (t) {
+      const a = agg[t[0]];
+      if (!a || (a.plan === 0 && a.fact === 0)) { h += '<td class="num">—</td>'; return; }
+      const delta = a.plan - a.fact;
+      const fl = deviationFlags(a.plan, a.fact, delta);
+      const cls = fl.alert ? ' cmp-alert' : (fl.undershoot ? ' cmp-under' : '');
+      const title = 'план ' + fmtT(a.plan) + ' → факт ' + fmtT(a.fact) + ' т';
+      h += '<td class="num' + cls + '" title="' + esc(title) + '">' + fmtSigned(delta, fmtT) + '</td>';
+    });
+    h += '<td>' + (rm.responsible ? esc(rm.responsible) : '—') + '</td></tr>';
+  });
+
+  h += '</tbody></table></div></div>';
+  return h;
 }
 
 // onlineBannerHTML() — sticky-баннер онлайн/офлайн.
