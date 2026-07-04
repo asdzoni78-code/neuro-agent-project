@@ -627,6 +627,17 @@ body.ai-modal-open { overflow: hidden; }
 .bottom-nav .nav-icon { font-size: 18px; }
 .bottom-nav .nav-label { font-size: 10px; white-space: nowrap; }
 
+/* Валидация и фиксация стадии (Ф10). */
+.field-missing { border-color: var(--danger) !important; background: rgba(220, 53, 69, .06); }
+.measure-validation { margin-top: var(--gap-md); }
+.valid-warn {
+  background: rgba(249, 115, 22, .1); border: 1px solid rgba(249, 115, 22, .35);
+  color: #9a3412; border-radius: var(--radius); padding: var(--gap-sm) var(--gap-md); font-size: var(--fs-sm);
+}
+.valid-warn ul { margin: var(--gap-xs) 0 0 var(--gap-lg); }
+.valid-warn li { margin: 2px 0; }
+.btn-fixate { width: 100%; font-size: var(--fs-base); padding: var(--gap-md); }
+
 /* Экран «Итоги замеров 1 стадии» (только просмотр). */
 .sum-room { font-size: var(--fs-lg); font-weight: 700; margin-bottom: var(--gap-xs); }
 .sum-block { }

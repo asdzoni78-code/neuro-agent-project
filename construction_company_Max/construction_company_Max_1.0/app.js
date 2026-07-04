@@ -661,16 +661,24 @@ const VIEW_SCREEN = {
 function showView(view) {
   if (!VIEW_SCREEN[view]) view = 'rooms';
 
-  // Переход на «Замер 2 стадии» из незаблокированной ст.1 — подтверждение и замок
-  // (пункт 5). При отказе остаёмся на текущем разделе.
+  // Переход на «Замер 2 стадии»: Стадия 1 должна быть заполнена и зафиксирована (Ф10).
+  // При отказе/незаполненности остаёмся на текущем разделе.
   if (view === 'measure2') {
     const found = currentRoomId ? findRoom(currentRoomId) : null;
-    if (found && !found.room.locked) {
-      const ok = confirm('Все размеры Стадии 1 внесены?\n\n'
-        + 'После перехода к Стадии 2 изменить их будет нельзя '
-        + '(при необходимости можно разблокировать вручную).');
+    if (found && !found.room.locked1) {
+      ensureStage(found.room, 1);
+      ensureStage(found.room, 2);
+      const miss = measureMissing(found.room, 1);
+      if (miss.length) {
+        alert('Сначала заполните Стадию 1 полностью.\n\nНе заполнено:\n• '
+          + miss.slice(0, 10).map(function (m) { return m.label; }).join('\n• ')
+          + (miss.length > 10 ? '\n• … и ещё ' + (miss.length - 10) : ''));
+        return;
+      }
+      const ok = confirm('Стадия 1 заполнена. Зафиксировать её и перейти к Стадии 2?\n\n'
+        + 'После фиксации размеры ст.1 менять нельзя (можно разблокировать вручную).');
       if (!ok) return;
-      found.room.locked = true;
+      found.room.locked1 = true;
       save();
     }
   }
@@ -742,10 +750,10 @@ function emptyStage() {
 }
 
 // newRoom() — новое помещение с двумя пустыми стадиями.
-// locked=false: стадия 1 редактируется свободно, пока прораб не перейдёт на ст.2
-// и не подтвердит, что все размеры внесены (пункт 5).
+// locked1/locked2: зафиксирована ли стадия (Ф10). Пока стадия не заполнена
+// полностью — фиксация недоступна, переход к ст.2 закрыт (пункты 5, 8).
 function newRoom(name) {
-  return { id: uuid(), name: name || 'Помещение', locked: false, stage1: emptyStage(), stage2: emptyStage() };
+  return { id: uuid(), name: name || 'Помещение', locked1: false, locked2: false, stage1: emptyStage(), stage2: emptyStage() };
 }
 
 // newOpening(type) — новый проём (Ф7). Проём = «дырка в стене» + откос вокруг неё.
@@ -995,6 +1003,93 @@ function mm(v) {
   return (Math.round(n * 10) / 10).toString();
 }
 
+// ---- Валидация замера (Ф10, пункт 8) ------------------------------------
+// measureMissing(room, stage) — список НЕзаполненных обязательных полей стадии.
+// «Обязательно» = поле, которое должно быть заполнено по контексту (например,
+// у стены выбран материал → нужна план.толщина; есть проём → нужны его размеры).
+// Возвращает [{ label, sel }] — подпись для списка и CSS-селектор поля для подсветки.
+function measureMissing(room, stage) {
+  const s = (stage === 2) ? room.stage2 : room.stage1;
+  const s1 = room.stage1;
+  const miss = [];
+  function need(val, label, sel) { if (!(num(val) > 0)) miss.push({ label: label, sel: sel }); }
+
+  // Общие размеры — всегда обязательны.
+  need(s.height, 'Высота', '[data-role="dim"][data-dim="height"]');
+  need(s.length, 'Длина А→В', '[data-role="dim"][data-dim="length"]');
+  need(s.width, 'Ширина Б→Г', '[data-role="dim"][data-dim="width"]');
+
+  if (stage === 1) {
+    const fl = s1.floor || {};
+    if (fl.materialId) need(fl.thicknessPlan, 'Пол: план.толщина', '[data-role="floor-thick-plan"]');
+    ['A', 'B', 'V', 'G'].forEach(function (k) {
+      const w = s1.walls[k] || {};
+      if (w.materialId) need(w.thicknessPlan, WALL_LABELS[k] + ': план.толщина', '[data-role="wall-thick-plan"][data-wall="' + k + '"]');
+      (Array.isArray(w.openings) ? w.openings : []).forEach(function (op) {
+        const nm = (OPENING_LABELS[op.type] || 'Проём') + ' (' + WALL_LABELS[k] + ')';
+        need(op.s1.w, nm + ': ширина ст.1', '[data-role="op-s1w"][data-op-id="' + op.id + '"]');
+        need(op.s1.h, nm + ': высота ст.1', '[data-role="op-s1h"][data-op-id="' + op.id + '"]');
+        if (op.materialId) {
+          need(op.depth, nm + ': глубина откоса', '[data-role="op-depth"][data-op-id="' + op.id + '"]');
+          need(op.thicknessPlan, nm + ': план.толщина откоса', '[data-role="op-thick-plan"][data-op-id="' + op.id + '"]');
+        }
+      });
+    });
+    (Array.isArray(s1.columns) ? s1.columns : []).forEach(function (c, i) {
+      if (c.materialId) {
+        need(c.perimeter1, 'Колонна ' + (i + 1) + ': периметр ст.1', '[data-role="col-perim1"][data-id="' + c.id + '"]');
+        need(c.height1, 'Колонна ' + (i + 1) + ': высота ст.1', '[data-role="col-h1"][data-id="' + c.id + '"]');
+        need(c.thicknessPlan, 'Колонна ' + (i + 1) + ': план.толщина', '[data-role="col-thick-plan"][data-id="' + c.id + '"]');
+      }
+    });
+  } else {
+    // Стадия 2: размеры проёмов ст.2 и периметр/высота колонн ст.2.
+    ['A', 'B', 'V', 'G'].forEach(function (k) {
+      const w = s1.walls[k] || {};
+      (Array.isArray(w.openings) ? w.openings : []).forEach(function (op) {
+        const nm = (OPENING_LABELS[op.type] || 'Проём') + ' (' + WALL_LABELS[k] + ')';
+        need(op.s2.w, nm + ': ширина ст.2', '[data-role="op-s2w"][data-op-id="' + op.id + '"]');
+        need(op.s2.h, nm + ': высота ст.2', '[data-role="op-s2h"][data-op-id="' + op.id + '"]');
+      });
+    });
+    (Array.isArray(s1.columns) ? s1.columns : []).forEach(function (c, i) {
+      if (c.materialId) {
+        need(c.perimeter2, 'Колонна ' + (i + 1) + ': периметр ст.2', '[data-role="col-perim2"][data-id="' + c.id + '"]');
+        need(c.height2, 'Колонна ' + (i + 1) + ': высота ст.2', '[data-role="col-h2"][data-id="' + c.id + '"]');
+      }
+    });
+  }
+  return miss;
+}
+
+// updateValidation(root, room, stage) — подсветить пустые обязательные поля и
+// показать либо список пропусков, либо кнопку «Зафиксировать стадию».
+function updateValidation(root, room, stage) {
+  const box = document.getElementById('measure-validation');
+  if (!box) return;
+  const locked = (stage === 2) ? !!room.locked2 : !!room.locked1;
+
+  root.querySelectorAll('.field-missing').forEach(function (el) { el.classList.remove('field-missing'); });
+  if (locked) { box.innerHTML = ''; return; } // стадия зафиксирована — гейта нет
+
+  const miss = measureMissing(room, stage);
+  miss.forEach(function (m) {
+    const el = root.querySelector(m.sel);
+    if (el) el.classList.add('field-missing');
+  });
+
+  if (miss.length) {
+    let h = '<div class="valid-warn"><b>Заполните обязательные поля (' + miss.length + '):</b><ul>';
+    miss.slice(0, 12).forEach(function (m) { h += '<li>' + esc(m.label) + '</li>'; });
+    if (miss.length > 12) h += '<li>… и ещё ' + (miss.length - 12) + '</li>';
+    h += '</ul></div>';
+    box.innerHTML = h;
+  } else {
+    box.innerHTML = '<button class="btn btn-primary btn-fixate" type="button" data-role="fixate">'
+      + '✓ Сохранить и зафиксировать Стадию ' + stage + '</button>';
+  }
+}
+
 function renderMeasure() {
   const root = document.getElementById('measure-root');
   if (!root) return;
@@ -1016,11 +1111,8 @@ function renderMeasure() {
 
   const measureTitle = document.getElementById('measure-title');
   if (measureTitle) measureTitle.textContent = isS2 ? 'Замер 2 стадии' : 'Замер 1 стадии';
-  const locked = !!room.locked;              // ст.1 заблокирована (пункт 5)
-  // Стадия 1 после блокировки — только чтение; на ст.2 select-ы описания тоже
-  // read-only (материалы/план.толщина задаются на ст.1).
-  const lockS1 = locked && !isS2;
-  const dis = (isS2 || lockS1) ? ' disabled' : '';
+  // Текущая стадия зафиксирована (Ф10) → поля только для чтения.
+  const stageLocked = isS2 ? !!room.locked2 : !!room.locked1;
 
   let html = '';
 
@@ -1032,23 +1124,23 @@ function renderMeasure() {
     + (isS2 ? 'Стадия 2 · факт' : 'Стадия 1 · план') + '</span>';
   html += '<button type="button" class="btn btn-sm btn-ghost" data-role="back">← К помещениям</button>';
   // Кнопка разблокировки — ВНЕ отключаемого блока, иначе была бы тоже неактивна.
-  if (locked) {
+  if (stageLocked) {
     html += '<button type="button" class="btn btn-sm btn-ghost" data-role="unlock" '
-      + 'title="Разблокировать редактирование стадии 1">🔓 Разблокировать ст.1</button>';
+      + 'title="Разблокировать редактирование стадии">🔓 Разблокировать ст.' + currentStage + '</button>';
   }
   html += '</div>';
 
-  if (lockS1) {
-    html += '<p class="hint hint-sm">🔒 Стадия 1 заблокирована — размеры зафиксированы. '
-      + 'Нажмите «Разблокировать ст.1», чтобы внести правки.</p>';
+  if (stageLocked) {
+    html += '<p class="hint hint-sm">🔒 Стадия ' + currentStage + ' зафиксирована — '
+      + 'размеры сохранены. Нажмите «Разблокировать ст.' + currentStage + '», чтобы внести правки.</p>';
   } else if (isS2) {
     html += '<p class="hint hint-sm">Стадия 2 (факт): вводите габариты после работ. '
-      + 'Материалы и план.толщина заданы на ст.1; толщина здесь считается автоматически.</p>';
+      + 'Толщина считается автоматически; материал при необходимости можно поправить.</p>';
   }
 
   // Оболочка для всех полей замера. Нативный disabled на <fieldset> отключает
-  // ВСЕ вложенные поля/кнопки разом — так реализуется блокировка ст.1 (пункт 5).
-  html += '<fieldset class="measure-fields"' + (lockS1 ? ' disabled' : '') + '>';
+  // ВСЕ вложенные поля/кнопки разом — так реализуется фиксация стадии (Ф10).
+  html += '<fieldset class="measure-fields"' + (stageLocked ? ' disabled' : '') + '>';
 
   // 2. Общие размеры.
   html += '<fieldset class="block"><legend>Общие размеры, мм</legend><div class="grid-3">';
@@ -1118,8 +1210,12 @@ function renderMeasure() {
 
   html += '</fieldset>'; // /measure-fields
 
+  // Блок валидации/фиксации — ВНЕ отключаемого fieldset (кнопка должна быть кликабельна).
+  html += '<div id="measure-validation" class="measure-validation"></div>';
+
   root.innerHTML = html;
   bindMeasureEvents(root);
+  updateValidation(root, room, currentStage);
 }
 
 // dimField — числовое поле габарита.
@@ -1294,7 +1390,6 @@ function renderOpening(op, key, isS2) {
 function renderWallBlock(room, key, isS2) {
   const s1 = room.stage1;
   const wallDesc = s1.walls[key] || { materialId: '', thicknessPlan: '', openings: [] };
-  const dis = isS2 ? ' disabled' : '';
 
   let h = '<details class="wall" data-wall="' + key + '"' + (openWalls[key] ? ' open' : '')
     + '><summary>' + esc(WALL_LABELS[key]) + '</summary>';
@@ -1565,6 +1660,7 @@ function bindMeasureEvents(root) {
       try { calcProject(); } catch (e) { console.error('[measure] calc:', e); }
       save();
       updateAutoFields(root, room);           // толщина ст.2 пересчитывается мгновенно
+      updateValidation(root, room, currentStage); // подсветка пропусков + кнопка «Зафиксировать»
     }
   });
 
@@ -1619,7 +1715,12 @@ function bindMeasureEvents(root) {
     const room = c.room, s1 = c.s1;
 
     if (role === 'unlock') {
-      room.locked = false;
+      if (currentStage === 2) room.locked2 = false; else room.locked1 = false;
+      save();
+      renderMeasure();
+    } else if (role === 'fixate') {
+      // Зафиксировать текущую стадию (Ф10): обязательные поля заполнены.
+      if (currentStage === 2) room.locked2 = true; else room.locked1 = true;
       save();
       renderMeasure();
     } else if (role === 'op-add') {
