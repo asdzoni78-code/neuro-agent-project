@@ -599,6 +599,8 @@ body.ai-modal-open { overflow: hidden; }
 .slope-title { font-size: var(--fs-sm); font-weight: 600; color: var(--text-muted); }
 .slope-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--gap-sm) var(--gap-md); }
 @media (max-width: 560px) { .slope-grid { grid-template-columns: 1fr; } }
+/* Поле во всю ширину сетки проёма (галочка «общий проём»). */
+.slope-grid .field-wide { grid-column: 1 / -1; }
 
 /* Панель действий на экране «Сравнение» (кнопка справочника, пункт 2). */
 .cmp-toolbar { display: flex; justify-content: flex-end; margin-bottom: var(--gap-md); }

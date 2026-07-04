@@ -4,8 +4,10 @@
 
 'use strict';
 
-// Ключ хранилища (см. SPEC.md «Данные»).
-const STORAGE_KEY = 'zamery_v1';
+// Ключ хранилища. v2 — новая модель проёмов/откосов (Ф7): откос — свойство
+// проёма, размеры проёма хранятся один раз с замерами ст.1/ст.2. Старый ключ
+// zamery_v1 не трогаем — так данные v1 не теряются, но и не тянут старую схему.
+const STORAGE_KEY = 'zamery_v2';
 
 // Справочник материалов по SPEC.md (нормы приблизительные, редактируемые).
 // Вынесен в функцию, чтобы каждый дефолтный state получал свежую копию
@@ -253,22 +255,17 @@ function calcWall(room, wallKey) {
   const wall = (walls1[wallKey] && typeof walls1[wallKey] === 'object') ? walls1[wallKey] : {};
   const mat = materialById(wall.materialId);
 
-  // Проёмы: сумма площадей в м². Защищаемся от отсутствия массива.
-  function openingsArea(stageWalls) {
-    const w = (stageWalls && stageWalls[wallKey] && Array.isArray(stageWalls[wallKey].openings))
-      ? stageWalls[wallKey].openings : [];
-    let sum = 0;
-    for (let i = 0; i < w.length; i++) {
-      sum += num(w[i].w) * num(w[i].h);
-    }
-    return sum / 1000000;
+  // Проёмы стены — канонический список в ст.1 (у каждого свои размеры ст.1/ст.2).
+  const wallOpenings = Array.isArray(wall.openings) ? wall.openings : [];
+  function sumHoles(stage) {
+    return wallOpenings.reduce(function (acc, op) { return acc + opHoleArea(op, stage); }, 0);
   }
 
   // -------- ПЛАН (стадия 1) --------
   const planHeight = num(s1.height);                       // высота всегда ст.1
   const planWidth = isAV ? num(s1.length) : num(s1.width); // ширина стены по ст.1
   const planGross = (planHeight * planWidth) / 1000000;
-  const planOpen = openingsArea(walls1);
+  const planOpen = sumHoles(1);
   // Чистая площадь не может быть отрицательной: если проёмы (по ошибке ввода)
   // больше самой стены — обнуляем, иначе получаются отрицательные тонны, которые
   // маскируют перерасход по всему материалу. Проверку «проём > стены» ловит валидация (Ф10).
@@ -281,8 +278,7 @@ function calcWall(room, wallKey) {
   const factHeight = (workOrder === 'screed_first') ? num(s2.height) : num(s1.height);
   const factWidth = isAV ? num(s2.length) : num(s2.width);
   const factGross = (factHeight * factWidth) / 1000000;
-  const walls2 = (s2.walls && typeof s2.walls === 'object') ? s2.walls : walls1;
-  const factOpen = openingsArea(walls2);
+  const factOpen = sumHoles(2); // проёмы те же (один список), но размеры ст.2
   const factNet = Math.max(0, factGross - factOpen); // не даём площади уйти в минус (см. planNet)
   // Толщина факта = половина разницы противоположных стен (наносится с двух сторон).
   const factThickness_mm = isAV
@@ -315,44 +311,80 @@ function calcWall(room, wallKey) {
   };
 }
 
+// ---- Проём: помощники (Ф7). Проём — это «дырка в стене» + откос вокруг неё. ----
+
+// opSize(op, stage) — размеры проёма нужной стадии (1 → s1, 2 → s2).
+function opSize(op, stage) {
+  const s = (stage === 2) ? (op && op.s2) : (op && op.s1);
+  return (s && typeof s === 'object') ? s : { w: '', h: '', doorW: '', doorH: '' };
+}
+
+// opHoleArea(op, stage) — площадь проёма (м²) для ВЫЧЕТА из стены.
+// Для «окна с балконной дверью» — сумма площадей окна и двери.
+// Если ст.2 не замерена — берём ст.1 (иначе площадь стены завысится).
+function opHoleArea(op, stage) {
+  let s = opSize(op, stage);
+  if (stage === 2 && !(num(s.w) > 0)) s = opSize(op, 1);
+  let a = num(s.w) * num(s.h);
+  if (op && op.type === 'window_balcony') a += num(s.doorW) * num(s.doorH);
+  return a / 1000000;
+}
+
+// opPerimeter(op) — периметр откоса (мм), считается автоматически (пункт 11).
+//   окно/дверь/другое: ширина + 2·высота (верх + 2 боковых, низ — подоконник/порог)
+//   окно с балконной дверью: (ширина_окна + ширина_двери) + 2·высота_двери (пункт 10)
+function opPerimeter(op) {
+  const s = opSize(op, 1); // номинал берём по ст.1
+  if (op && op.type === 'window_balcony') {
+    return num(s.w) + num(s.doorW) + 2 * num(s.doorH);
+  }
+  return num(s.w) + 2 * num(s.h);
+}
+
+// opFactThickness(op) — фактическая толщина штукатурки на откосе из того,
+// насколько уменьшился проём между ст.1 и ст.2:
+//   боковые откосы «съедают» ширину с двух сторон → (w1 − w2)/2
+//   верхний откос «съедает» высоту сверху         → (h1 − h2)
+// Среднее доступных оценок; нет замеров ст.2 → факт = план.
+function opFactThickness(op) {
+  const a = opSize(op, 1), b = opSize(op, 2);
+  const ests = [];
+  if (num(a.w) > 0 && num(b.w) > 0) ests.push((num(a.w) - num(b.w)) / 2);
+  if (num(a.h) > 0 && num(b.h) > 0) ests.push(num(a.h) - num(b.h));
+  if (op && op.type === 'window_balcony') {
+    if (num(a.doorW) > 0 && num(b.doorW) > 0) ests.push((num(a.doorW) - num(b.doorW)) / 2);
+    if (num(a.doorH) > 0 && num(b.doorH) > 0) ests.push(num(a.doorH) - num(b.doorH));
+  }
+  return ests.length
+    ? ests.reduce(function (x, y) { return x + y; }, 0) / ests.length
+    : num(op && op.thicknessPlan);
+}
+
 // ----------------------------------------------------------------------------
-// 3) calcSlope(slope) — ОТКОС (двухстадийный)
-//   area_m2 = (perimeter × width) / 1e6         (width — глубина плоскости откоса)
-//   План.толщина  — thicknessPlan (задаётся на ст.1; откат на старое thickness).
-//   Факт.толщина  — из того, насколько уменьшился ПРОЁМ окна/двери после
-//     штукатурки откосов (замер проёма на ст.1 и ст.2):
-//       боковые откосы «съедают» ширину с двух сторон → t = (openW1 − openW2)/2
-//       верхний откос  «съедает» высоту сверху        → t = (openH1 − openH2)
-//     Берём среднее доступных оценок; если проём не замерян — факт = план.
+// 3) calcOpening(op) — ОТКОС проёма (двухстадийный, Ф7)
+//   area_m2       = perimeter(авто) × depth / 1e6
+//   План.толщина  = thicknessPlan;  Факт.толщина = из разницы проёма ст.1/ст.2.
+//   sharedCounted=false → общий проём, откос уже посчитан в смежном помещении →
+//     расход тут = 0 (площадь из стены при этом всё равно вычитается, пункт 2).
 //   consumption_t = area × (толщина_мм/10) × норма / 1000
 // ----------------------------------------------------------------------------
-function calcSlope(slope) {
-  const s = (slope && typeof slope === 'object') ? slope : {};
-  const mat = materialById(s.materialId);
-  const area_m2 = (num(s.perimeter) * num(s.width)) / 1000000;
-
-  // План: новое поле thicknessPlan, с откатом на старое единое thickness.
-  const planThickness = num(
-    (s.thicknessPlan !== undefined && s.thicknessPlan !== '') ? s.thicknessPlan : s.thickness
-  );
-
-  // Факт: оценки толщины из разницы размеров проёма между стадиями.
-  const ests = [];
-  if (num(s.openW1) > 0 && num(s.openW2) > 0) ests.push((num(s.openW1) - num(s.openW2)) / 2);
-  if (num(s.openH1) > 0 && num(s.openH2) > 0) ests.push(num(s.openH1) - num(s.openH2));
-  const factThickness = ests.length
-    ? ests.reduce(function (a, b) { return a + b; }, 0) / ests.length
-    : planThickness; // нет замеров проёма — считаем факт равным плану
-
+function calcOpening(op) {
+  const o = (op && typeof op === 'object') ? op : {};
+  const mat = materialById(o.materialId);
+  const area_m2 = opPerimeter(o) * num(o.depth) / 1000000;
+  const planThk = num(o.thicknessPlan);
+  const factThk = opFactThickness(o);
+  const counted = o.sharedCounted !== false; // общий, учтён в смежном → не считаем
   return {
     surface: 'slope',
-    id: s.id || null,
-    materialId: s.materialId || null,
+    id: o.id || null,
+    wall: o.wall || null,
+    materialId: o.materialId || null,
     materialName: mat.name,
     area_m2: area_m2,
-    thickness_mm: planThickness, // обратная совместимость (использовалось где-то)
-    plan: { thickness_mm: planThickness, consumption_t: consumption(area_m2, planThickness, mat.norm) },
-    fact: { thickness_mm: factThickness, consumption_t: consumption(area_m2, factThickness, mat.norm) }
+    thickness_mm: planThk,
+    plan: { thickness_mm: planThk, consumption_t: counted ? consumption(area_m2, planThk, mat.norm) : 0 },
+    fact: { thickness_mm: factThk, consumption_t: counted ? consumption(area_m2, factThk, mat.norm) : 0 }
   };
 }
 
@@ -386,7 +418,7 @@ function calcColumn(column) {
 // Возвращает:
 //   {
 //     id, name, responsible,
-//     surfaces: [ ...результаты calcFloor/calcWall/calcSlope/calcColumn ],
+//     surfaces: [ ...результаты calcFloor/calcWall/calcOpening/calcColumn ],
 //     byMaterial: { <materialId>: { materialId, materialName, norm, price,
 //                                   plan_t, fact_t } }
 //   }
@@ -402,18 +434,23 @@ function calcRoom(room) {
     surfaces.push(calcFloor(r));
   }
 
-  // Четыре стены — считаем те, у которых задан материал.
+  // Четыре стены + их проёмы (откосы). Стену считаем при заданном материале стены;
+  // откос проёма — при заданном материале проёма (независимо от материала стены).
   const walls1 = (s1.walls && typeof s1.walls === 'object') ? s1.walls : {};
   ['A', 'B', 'V', 'G'].forEach(function (key) {
-    if (walls1[key] && walls1[key].materialId) {
-      surfaces.push(calcWall(r, key));
-    }
+    const w = walls1[key] || {};
+    if (w.materialId) surfaces.push(calcWall(r, key));
+    const ops = Array.isArray(w.openings) ? w.openings : [];
+    ops.forEach(function (op) {
+      if (op && op.materialId) {
+        const res = calcOpening(op);
+        res.wall = key;                 // для подписи «Откос (Стена А)»
+        surfaces.push(res);
+      }
+    });
   });
 
-  // Откосы и колонны.
-  (Array.isArray(s1.slopes) ? s1.slopes : []).forEach(function (sl) {
-    if (sl && sl.materialId) surfaces.push(calcSlope(sl));
-  });
+  // Колонны.
   (Array.isArray(s1.columns) ? s1.columns : []).forEach(function (col) {
     if (col && col.materialId) surfaces.push(calcColumn(col));
   });
@@ -601,6 +638,13 @@ function showScreen(screenId) {
   });
 }
 
+// findOpening(stage1, wall, id) — найти проём в ст.1 по стене и id (Ф7).
+function findOpening(stage1, wall, id) {
+  const w = stage1 && stage1.walls && stage1.walls[wall];
+  const arr = (w && Array.isArray(w.openings)) ? w.openings : [];
+  return arr.find(function (x) { return x && x.id === id; });
+}
+
 // findRoom(roomId) — вернуть { floor, room, fIndex, rIndex } или null.
 function findRoom(roomId) {
   const floors = (state.project && Array.isArray(state.project.floors)) ? state.project.floors : [];
@@ -629,8 +673,9 @@ function emptyStage() {
       V: { materialId: '', thicknessPlan: '', openings: [] },
       G: { materialId: '', thicknessPlan: '', openings: [] }
     },
-    slopes: [],
     columns: []
+    // Откосы больше не отдельный список: откос — свойство проёма (Ф7).
+    // Канонические проёмы живут в stage1.walls[key].openings (см. newOpening).
   };
 }
 
@@ -639,6 +684,36 @@ function emptyStage() {
 // и не подтвердит, что все размеры внесены (пункт 5).
 function newRoom(name) {
   return { id: uuid(), name: name || 'Помещение', locked: false, stage1: emptyStage(), stage2: emptyStage() };
+}
+
+// newOpening(type) — новый проём (Ф7). Проём = «дырка в стене» + откос вокруг неё.
+//   type: window | door | window_balcony | other.
+//   s1/s2 — размеры проёма ДО/ПОСЛЕ работ (для площади стены и толщины откоса).
+//   depth — глубина плоскости откоса; thicknessPlan — план.толщина штукатурки откоса.
+//   materialId — материал откоса; sharedCounted=false → откос уже посчитан в смежном
+//   помещении (площадь из стены всё равно вычитается, но расход откоса тут не считаем).
+function newOpening(type) {
+  return {
+    id: uuid(),
+    type: type || 'window',
+    materialId: '',
+    depth: '',
+    thicknessPlan: '',
+    sharedCounted: true,
+    s1: { w: '', h: '', doorW: '', doorH: '' },
+    s2: { w: '', h: '', doorW: '', doorH: '' }
+  };
+}
+
+// ensureOpening(op) — привести проём к полной структуре (защита от неполных данных).
+function ensureOpening(op) {
+  if (!op || typeof op !== 'object') return newOpening();
+  if (!op.id) op.id = uuid();
+  if (!op.type) op.type = 'window';
+  if (op.sharedCounted === undefined) op.sharedCounted = true;
+  if (!op.s1 || typeof op.s1 !== 'object') op.s1 = { w: '', h: '', doorW: '', doorH: '' };
+  if (!op.s2 || typeof op.s2 !== 'object') op.s2 = { w: '', h: '', doorW: '', doorH: '' };
+  return op;
 }
 
 // ensureStage(room, n) — гарантировать, что у комнаты есть корректная стадия n
@@ -654,8 +729,9 @@ function ensureStage(room, n) {
       s.walls[k] = { materialId: '', thicknessPlan: '', openings: [] };
     }
     if (!Array.isArray(s.walls[k].openings)) s.walls[k].openings = [];
+    // Канонические проёмы — в ст.1; приводим их к полной структуре (Ф7).
+    if (n !== 2) s.walls[k].openings = s.walls[k].openings.map(ensureOpening);
   });
-  if (!Array.isArray(s.slopes)) s.slopes = [];
   if (!Array.isArray(s.columns)) s.columns = [];
   return s;
 }
@@ -954,8 +1030,7 @@ function renderMeasure() {
   });
   html += '</fieldset>';
 
-  // 7. Откосы (хранятся в stage1 — их читает calcRoom из ст.1).
-  html += renderSlopes(s1, isS2);
+  // 7. Откосы теперь внутри стен (как свойство проёма) — отдельной секции нет (Ф7).
 
   // 8. Колонны (тоже из stage1).
   html += renderColumns(s1, isS2);
@@ -1062,13 +1137,90 @@ function woRadio(label, value, current) {
 // Русские подписи стен для UI (в данных ключи A/B/V/G).
 const WALL_LABELS = { A: 'Стена А', B: 'Стена Б', V: 'Стена В', G: 'Стена Г' };
 
+// Подписи и опции типов проёма (Ф7).
+const OPENING_LABELS = { window: 'Окно', door: 'Дверь', window_balcony: 'Окно с балконной дверью', other: 'Другое' };
+function opTypeOptions(selected) {
+  const types = [['window', 'Окно'], ['door', 'Дверь'], ['window_balcony', 'Окно с балконной дверью'], ['other', 'Другое']];
+  return types.map(function (t) {
+    return '<option value="' + t[0] + '"' + (t[0] === selected ? ' selected' : '') + '>' + esc(t[1]) + '</option>';
+  }).join('');
+}
+
+// opField — компактное числовое поле проёма (адресуется парой стена+id проёма).
+function opField(label, role, key, id, value, readOnly) {
+  return '<div class="field"><label class="field-label">' + esc(label) + '</label>'
+    + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="' + role + '" '
+    + 'data-wall="' + key + '" data-op-id="' + esc(id) + '" value="' + esc(value) + '" '
+    + 'placeholder="мм"' + (readOnly ? ' readonly' : '') + '></div>';
+}
+
+// renderOpening(op, key, isS2) — карточка проёма внутри блока стены.
+//   ст.1: тип, размеры ст.1 (+ дверь для балконного), материал/глубина/план откоса,
+//         авто-периметр, галочка «общий проём».
+//   ст.2: описание read-only + размеры ст.2 + авторасчёт фактической толщины откоса
+//         из разницы проёма и цветной маркер.
+function renderOpening(op, key, isS2) {
+  const id = op.id;
+  const isBalcony = op.type === 'window_balcony';
+  const mat = materialById(op.materialId);
+  const s1 = op.s1 || {}, s2 = op.s2 || {};
+
+  let h = '<div class="opening-card slope-card" data-op-id="' + esc(id) + '">';
+  h += '<div class="slope-head"><span class="slope-title">' + esc(OPENING_LABELS[op.type] || 'Проём') + '</span>';
+  if (!isS2) {
+    h += '<button class="btn-icon btn-danger" type="button" data-role="op-del" data-wall="' + key + '" data-op-id="' + esc(id) + '" title="Удалить проём">✕</button>';
+  }
+  h += '</div><div class="slope-grid">';
+
+  if (!isS2) {
+    h += '<div class="field"><label class="field-label">Тип проёма</label>'
+      + '<select class="sel sel-sm" data-role="op-type" data-wall="' + key + '" data-op-id="' + esc(id) + '">'
+      + opTypeOptions(op.type) + '</select></div>';
+    h += opField('Ширина проёма ст.1, мм', 'op-s1w', key, id, s1.w, false);
+    h += opField('Высота проёма ст.1, мм', 'op-s1h', key, id, s1.h, false);
+    if (isBalcony) {
+      h += opField('Ширина двери ст.1, мм', 'op-s1dw', key, id, s1.doorW, false);
+      h += opField('Высота двери ст.1, мм', 'op-s1dh', key, id, s1.doorH, false);
+    }
+    h += '<div class="field"><label class="field-label">Материал откоса</label>'
+      + '<select class="sel sel-sm" data-role="op-material" data-wall="' + key + '" data-op-id="' + esc(id) + '">'
+      + materialOptions(op.materialId) + '</select></div>';
+    h += opField('Глубина откоса, мм', 'op-depth', key, id, op.depth, false);
+    h += opField('План.толщина откоса, мм', 'op-thick-plan', key, id, op.thicknessPlan, false);
+    h += '<div class="field"><label class="field-label">Периметр откоса, мм</label>'
+      + '<input class="txt txt-sm auto" type="text" value="' + esc(mm(opPerimeter(op))) + '" readonly>'
+      + '<span class="unit-note">авторасчёт</span></div>';
+    h += '<div class="field field-wide"><label class="radio"><input type="checkbox" data-role="op-shared" data-wall="' + key + '" data-op-id="' + esc(id) + '"'
+      + (op.sharedCounted === false ? ' checked' : '') + '> общий проём — откос уже посчитан в смежном помещении</label></div>';
+  } else {
+    const calc = calcOpening(op);
+    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
+    h += '<div class="field"><label class="field-label">Материал откоса</label>'
+      + '<input class="txt txt-sm" type="text" value="' + esc(mat.name || '—') + '" readonly></div>';
+    h += opField('Ширина проёма ст.1', 'op-s1w', key, id, s1.w, true);
+    h += opField('Высота проёма ст.1', 'op-s1h', key, id, s1.h, true);
+    h += opField('Ширина проёма ст.2', 'op-s2w', key, id, s2.w, false);
+    h += opField('Высота проёма ст.2', 'op-s2h', key, id, s2.h, false);
+    if (isBalcony) {
+      h += opField('Ширина двери ст.1', 'op-s1dw', key, id, s1.doorW, true);
+      h += opField('Высота двери ст.1', 'op-s1dh', key, id, s1.doorH, true);
+      h += opField('Ширина двери ст.2', 'op-s2dw', key, id, s2.doorW, false);
+      h += opField('Высота двери ст.2', 'op-s2dh', key, id, s2.doorH, false);
+    }
+    h += '<div class="field"><label class="field-label">Толщина откоса (факт), мм '
+      + '<span class="thick-marker ' + markerDotClass(mk.state) + '" data-op-marker="' + esc(id) + '" title="' + esc(mk.title) + '"></span></label>'
+      + '<input class="txt auto" type="text" data-op-auto="' + esc(id) + '" value="' + esc(mm(calc.fact.thickness_mm)) + '" readonly>'
+      + '<span class="unit-note" data-op-note="' + esc(id) + '">' + esc(mk.note) + '</span></div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
 // renderWallBlock — раскрывающийся блок одной стены.
 function renderWallBlock(room, key, isS2) {
   const s1 = room.stage1;
   const wallDesc = s1.walls[key] || { materialId: '', thicknessPlan: '', openings: [] };
-  // Проёмы: на ст.1 — из ст.1; на ст.2 — свои (если пусто, отображаем ст.1 как основу).
-  const stageWall = (isS2 ? room.stage2.walls[key] : wallDesc) || { openings: [] };
-  const openings = Array.isArray(stageWall.openings) ? stageWall.openings : [];
   const dis = isS2 ? ' disabled' : '';
 
   let h = '<details class="wall" data-wall="' + key + '"' + (openWalls[key] ? ' open' : '')
@@ -1097,91 +1249,15 @@ function renderWallBlock(room, key, isS2) {
   }
   h += '</div>';
 
-  // Проёмы.
-  h += '<div class="openings"><div class="openings-head">Проёмы</div>';
-  if (!openings.length) h += '<p class="hint hint-sm">Нет проёмов.</p>';
-  openings.forEach(function (op, idx) {
-    h += '<div class="opening-row" data-wall="' + key + '" data-idx="' + idx + '">'
-      + '<select class="sel sel-sm" data-role="op-type" data-wall="' + key + '" data-idx="' + idx + '">'
-      + '<option value="window"' + (op.type === 'window' ? ' selected' : '') + '>Окно</option>'
-      + '<option value="door"' + (op.type === 'door' ? ' selected' : '') + '>Дверь</option>'
-      + '<option value="other"' + (op.type === 'other' ? ' selected' : '') + '>Другое</option>'
-      + '</select>'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="op-w" data-wall="' + key + '" data-idx="' + idx + '" value="' + esc(op.w) + '" placeholder="ширина">'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="op-h" data-wall="' + key + '" data-idx="' + idx + '" value="' + esc(op.h) + '" placeholder="высота">'
-      + '<button class="btn-icon btn-danger" type="button" data-role="del-opening" data-wall="' + key + '" data-idx="' + idx + '" title="Удалить проём">✕</button>'
-      + '</div>';
-  });
-  h += '<button class="btn btn-sm" type="button" data-role="add-opening" data-wall="' + key + '">+ Проём</button>';
+  // Проёмы (с откосами). Канонический список — в ст.1, показываем на обеих стадиях.
+  h += '<div class="openings"><div class="openings-head">Проёмы и откосы</div>';
+  const wallOpenings = Array.isArray(s1.walls[key].openings) ? s1.walls[key].openings : [];
+  if (!wallOpenings.length) h += '<p class="hint hint-sm">Нет проёмов.</p>';
+  wallOpenings.forEach(function (op) { h += renderOpening(op, key, isS2); });
+  if (!isS2) h += '<button class="btn btn-sm" type="button" data-role="op-add" data-wall="' + key + '">+ Проём</button>';
   h += '</div>'; // openings
 
   h += '</div></details>';
-  return h;
-}
-
-// slField — компактное числовое поле откоса (readonly → серое, не редактируется).
-function slField(label, role, id, value, readOnly) {
-  return '<div class="field"><label class="field-label">' + esc(label) + '</label>'
-    + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="' + role + '" data-id="' + esc(id) + '" '
-    + 'value="' + esc(value) + '" placeholder="мм"' + (readOnly ? ' readonly' : '') + '></div>';
-}
-
-// renderSlopeItem(sl, isS2) — карточка одного откоса.
-//   ст.1: периметр, глубина, материал, план.толщина, проём (ширина/высота) ДО работ.
-//   ст.2: описание read-only + проём ПОСЛЕ работ (редактируется) + авторасчёт
-//         фактической толщины из разницы проёма и цветной маркер (пункты 3, 6).
-function renderSlopeItem(sl, isS2) {
-  const id = sl.id;
-  const mat = materialById(sl.materialId);
-  // План.толщина: новое поле thicknessPlan с откатом на старое thickness.
-  const planThick = (sl.thicknessPlan !== undefined && sl.thicknessPlan !== '') ? sl.thicknessPlan : sl.thickness;
-
-  let h = '<div class="slope-card" data-slope-id="' + esc(id) + '">';
-  h += '<div class="slope-head"><span class="slope-title">Откос</span>';
-  if (!isS2) {
-    h += '<button class="btn-icon btn-danger" type="button" data-role="del-slope" data-id="' + esc(id) + '" title="Удалить откос">✕</button>';
-  }
-  h += '</div><div class="slope-grid">';
-
-  if (!isS2) {
-    h += slField('Периметр, мм', 'slope-perimeter', id, sl.perimeter, false);
-    h += slField('Глубина откоса, мм', 'slope-width', id, sl.width, false);
-    h += '<div class="field"><label class="field-label">Материал</label>'
-      + '<select class="sel sel-sm" data-role="slope-material" data-id="' + esc(id) + '">' + materialOptions(sl.materialId) + '</select></div>';
-    h += slField('План.толщина, мм', 'slope-thick', id, planThick, false);
-    h += slField('Проём: ширина ст.1, мм', 'slope-ow1', id, sl.openW1, false);
-    h += slField('Проём: высота ст.1, мм', 'slope-oh1', id, sl.openH1, false);
-  } else {
-    const calc = calcSlope(sl);
-    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
-    h += '<div class="field"><label class="field-label">Материал</label>'
-      + '<input class="txt txt-sm" type="text" value="' + esc(mat.name || '—') + '" readonly></div>';
-    h += slField('План.толщина, мм', 'slope-thick', id, mm(calc.plan.thickness_mm), true);
-    h += slField('Проём: ширина ст.1, мм', 'slope-ow1', id, sl.openW1, true);
-    h += slField('Проём: высота ст.1, мм', 'slope-oh1', id, sl.openH1, true);
-    h += slField('Проём: ширина ст.2, мм', 'slope-ow2', id, sl.openW2, false);
-    h += slField('Проём: высота ст.2, мм', 'slope-oh2', id, sl.openH2, false);
-    h += '<div class="field"><label class="field-label">Толщина (факт), мм '
-      + '<span class="thick-marker ' + markerDotClass(mk.state) + '" data-slope-marker="' + esc(id) + '" title="' + esc(mk.title) + '"></span></label>'
-      + '<input class="txt auto" type="text" data-slope-auto="' + esc(id) + '" value="' + esc(mm(calc.fact.thickness_mm)) + '" readonly>'
-      + '<span class="unit-note" data-slope-note="' + esc(id) + '">' + esc(mk.note) + '</span></div>';
-  }
-
-  h += '</div></div>';
-  return h;
-}
-
-// renderSlopes — список откосов (данные в stage1). Проём ст.2 замеряется на ст.2,
-// но хранится в том же объекте откоса (единый список), поэтому редактируется и там.
-function renderSlopes(s1, isS2) {
-  const slopes = Array.isArray(s1.slopes) ? s1.slopes : [];
-  let h = '<fieldset class="block"><legend>Откосы</legend>';
-  h += '<p class="hint hint-sm">Толщина факта считается из того, насколько уменьшился '
-    + 'проём окна/двери после штукатурки (замер проёма на ст.1 и ст.2).</p>';
-  if (!slopes.length) h += '<p class="hint hint-sm">Нет откосов.</p>';
-  slopes.forEach(function (sl) { h += renderSlopeItem(sl, isS2); });
-  if (!isS2) h += '<button class="btn btn-sm" type="button" data-role="add-slope">+ Откос</button>';
-  h += '</fieldset>';
   return h;
 }
 
@@ -1232,17 +1308,22 @@ function updateAutoFields(root, room) {
     }
   });
 
-  // Откосы: пересчёт фактической толщины из разницы проёма + маркер (пункты 3, 6).
-  const slopes = Array.isArray(s1.slopes) ? s1.slopes : [];
-  root.querySelectorAll('[data-slope-auto]').forEach(function (el) {
-    const id = el.dataset.slopeAuto;
-    const sl = slopes.find(function (x) { return x.id === id; });
-    if (!sl) return;
-    const calc = calcSlope(sl);
+  // Откосы проёмов: пересчёт фактической толщины из разницы проёма + маркер (пункты 3, 6).
+  root.querySelectorAll('[data-op-auto]').forEach(function (el) {
+    const id = el.dataset.opAuto;
+    let op = null;
+    ['A', 'B', 'V', 'G'].forEach(function (k) {
+      if (op) return;
+      const w = s1.walls[k];
+      const found = (w && Array.isArray(w.openings)) ? w.openings.find(function (x) { return x.id === id; }) : null;
+      if (found) op = found;
+    });
+    if (!op) return;
+    const calc = calcOpening(op);
     el.value = mm(calc.fact.thickness_mm);
     const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
-    setMarker(root.querySelector('[data-slope-marker="' + cssEsc(id) + '"]'), mk);
-    const note = root.querySelector('[data-slope-note="' + cssEsc(id) + '"]');
+    setMarker(root.querySelector('[data-op-marker="' + cssEsc(id) + '"]'), mk);
+    const note = root.querySelector('[data-op-note="' + cssEsc(id) + '"]');
     if (note) note.textContent = mk.note;
   });
 
@@ -1320,21 +1401,17 @@ function bindMeasureEvents(root) {
       s1.floor.thicknessPlan = el.value;      // описание — всегда в ст.1
     } else if (role === 'wall-thick-plan') {
       s1.walls[el.dataset.wall].thicknessPlan = el.value;
-    } else if (role === 'op-w' || role === 'op-h') {
-      const stageWalls = (currentStage === 2 ? room.stage2 : s1).walls;
-      const arr = stageWalls[el.dataset.wall].openings;
-      const op = arr[Number(el.dataset.idx)];
-      if (op) op[role === 'op-w' ? 'w' : 'h'] = el.value;
-    } else if (role === 'slope-perimeter' || role === 'slope-width' || role === 'slope-thick'
-            || role === 'slope-ow1' || role === 'slope-oh1' || role === 'slope-ow2' || role === 'slope-oh2') {
-      const sl = s1.slopes.find(function (x) { return x.id === el.dataset.id; });
-      if (sl) {
-        const map = {
-          'slope-perimeter': 'perimeter', 'slope-width': 'width', 'slope-thick': 'thicknessPlan',
-          'slope-ow1': 'openW1', 'slope-oh1': 'openH1', 'slope-ow2': 'openW2', 'slope-oh2': 'openH2'
-        };
-        sl[map[role]] = el.value;
+    } else if (role.indexOf('op-s1') === 0 || role.indexOf('op-s2') === 0) {
+      // Размеры проёма ст.1/ст.2 (op-s1w/h/dw/dh, op-s2w/h/dw/dh).
+      const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
+      if (op) {
+        const stageObj = (role.indexOf('op-s2') === 0) ? op.s2 : op.s1;
+        const fieldMap = { w: 'w', h: 'h', dw: 'doorW', dh: 'doorH' };
+        stageObj[fieldMap[role.slice(5)]] = el.value;
       }
+    } else if (role === 'op-depth' || role === 'op-thick-plan') {
+      const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
+      if (op) op[role === 'op-depth' ? 'depth' : 'thicknessPlan'] = el.value;
     } else if (role === 'col-perimeter' || role === 'col-height' || role === 'col-thick') {
       const c = s1.columns.find(function (x) { return x.id === el.dataset.id; });
       if (c) {
@@ -1369,12 +1446,14 @@ function bindMeasureEvents(root) {
     } else if (role === 'wall-material') {
       s1.walls[el.dataset.wall].materialId = el.value;
     } else if (role === 'op-type') {
-      const stageWalls = (currentStage === 2 ? room.stage2 : s1).walls;
-      const op = stageWalls[el.dataset.wall].openings[Number(el.dataset.idx)];
+      const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
       if (op) op.type = el.value;
-    } else if (role === 'slope-material') {
-      const sl = s1.slopes.find(function (x) { return x.id === el.dataset.id; });
-      if (sl) sl.materialId = el.value;
+    } else if (role === 'op-material') {
+      const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
+      if (op) op.materialId = el.value;
+    } else if (role === 'op-shared') {
+      const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
+      if (op) op.sharedCounted = !el.checked; // отмечено = «уже посчитан в смежном» → не считаем тут
     } else if (role === 'col-material') {
       const c = s1.columns.find(function (x) { return x.id === el.dataset.id; });
       if (c) c.materialId = el.value;
@@ -1422,22 +1501,13 @@ function bindMeasureEvents(root) {
       room.locked = false;
       save();
       renderMeasure();
-    } else if (role === 'add-opening') {
-      const stageWalls = (currentStage === 2 ? room.stage2 : s1).walls;
-      stageWalls[btn.dataset.wall].openings.push({ type: 'window', w: '', h: '' });
+    } else if (role === 'op-add') {
+      s1.walls[btn.dataset.wall].openings.push(newOpening('window'));
       persist();
-    } else if (role === 'del-opening') {
-      const stageWalls = (currentStage === 2 ? room.stage2 : s1).walls;
-      stageWalls[btn.dataset.wall].openings.splice(Number(btn.dataset.idx), 1);
-      persist();
-    } else if (role === 'add-slope') {
-      s1.slopes.push({
-        id: uuid(), perimeter: '', width: '', materialId: '', thicknessPlan: '',
-        openW1: '', openH1: '', openW2: '', openH2: ''
-      });
-      persist();
-    } else if (role === 'del-slope') {
-      s1.slopes = s1.slopes.filter(function (x) { return x.id !== btn.dataset.id; });
+    } else if (role === 'op-del') {
+      const arr = s1.walls[btn.dataset.wall].openings;
+      const i = arr.findIndex(function (x) { return x.id === btn.dataset.opId; });
+      if (i > -1) arr.splice(i, 1);
       persist();
     } else if (role === 'add-col') {
       s1.columns.push({ id: uuid(), perimeter: '', height: '', materialId: '', thickness: '' });
@@ -1694,12 +1764,15 @@ const SURFACE_LABELS = {
   floor: 'Пол', wall: 'Стена', slope: 'Откос', column: 'Колонна'
 };
 
-// surfaceLabel(surf) — «Стена А», «Пол», «Откос» и т.п.
+// surfaceLabel(surf) — «Стена А», «Пол», «Откос (Стена А)» и т.п.
 function surfaceLabel(surf) {
   const base = SURFACE_LABELS[surf.surface] || surf.surface || 'Поверхность';
+  const w = { A: 'А', B: 'Б', V: 'В', G: 'Г' };
   if (surf.surface === 'wall' && surf.wallKey) {
-    const w = { A: 'А', B: 'Б', V: 'В', G: 'Г' };
     return base + ' ' + (w[surf.wallKey] || surf.wallKey);
+  }
+  if (surf.surface === 'slope' && surf.wall) {
+    return base + ' (Стена ' + (w[surf.wall] || surf.wall) + ')';
   }
   return base;
 }
@@ -1960,7 +2033,7 @@ function closeMaterialsModal() {
 }
 
 if (typeof module !== 'undefined') {
-  module.exports = { calcFloor, calcWall, calcSlope, calcColumn, calcRoom, calcProject };
+  module.exports = { calcFloor, calcWall, calcOpening, calcColumn, calcRoom, calcProject };
 }
 
 if (typeof module !== 'undefined' && require.main === module) {
@@ -2002,12 +2075,11 @@ if (typeof module !== 'undefined' && require.main === module) {
       floor: {},
       walls: {
         A: { materialId: 'plaster_g', thicknessPlan: 20,
-             openings: [{ type: 'window', w: 1200, h: 1400 }] }
+             openings: [{ id: 'o1', type: 'window', s1: { w: 1200, h: 1400 }, s2: { w: 1200, h: 1400 } }] }
       },
-      slopes: [], columns: []
+      columns: []
     },
-    stage2: { height: 3000, length: 4960, width: 4000, workOrder: 'plaster_first',
-      walls: { A: { openings: [{ type: 'window', w: 1200, h: 1400 }] } } }
+    stage2: { height: 3000, length: 4960, width: 4000, workOrder: 'plaster_first', walls: {} }
   };
   const w = calcWall(roomWall, 'A');
   assertClose('стена A gross план м2', w.plan.gross_m2, 15);            // 3000*5000/1e6
@@ -2031,9 +2103,21 @@ if (typeof module !== 'undefined' && require.main === module) {
   const wWO2 = calcWall(roomWO2, 'A');
   assertClose('стена факт высота = height_s1 (plaster_first)', wWO2.fact.wall_height_mm, 3000);
 
-  console.log('--- Тест 3: ОТКОС 3400x250 => 0.85 м2 ---');
-  const sl = calcSlope({ id: 's1', perimeter: 3400, width: 250, materialId: 'plaster_g', thickness: 15 });
-  assertClose('откос площадь м2', sl.area_m2, 0.85);                    // 3400*250/1e6
+  console.log('--- Тест 3: ОТКОС проёма (авто-периметр, толщина из разницы) ---');
+  const op3 = { id: 'o3', type: 'window', depth: 250, thicknessPlan: 15, materialId: 'plaster_g',
+    s1: { w: 1500, h: 2000, doorW: '', doorH: '' }, s2: { w: 1440, h: 1960, doorW: '', doorH: '' } };
+  assertClose('откос авто-периметр', opPerimeter(op3), 5500);          // 1500 + 2*2000
+  const r3 = calcOpening(op3);
+  assertClose('откос площадь м2', r3.area_m2, 1.375);                  // 5500*250/1e6
+  assertClose('откос факт толщина', r3.fact.thickness_mm, 35);         // ((1500-1440)/2 + (2000-1960))/2
+  // Балконный проём: perimeter = (w+doorW) + 2*doorH
+  assertClose('балкон авто-периметр',
+    opPerimeter({ type: 'window_balcony', s1: { w: 2000, h: 1500, doorW: 800, doorH: 2100 } }), 7000);
+  // Общий проём (sharedCounted=false) — расход откоса не считаем здесь.
+  const rShared = calcOpening({ type: 'window', depth: 250, thicknessPlan: 15, materialId: 'plaster_g',
+    sharedCounted: false, s1: { w: 1500, h: 2000 }, s2: { w: 1440, h: 1960 } });
+  assertClose('общий проём: план откоса = 0', rShared.plan.consumption_t, 0);
+  assertClose('общий проём: факт откоса = 0', rShared.fact.consumption_t, 0);
 
   console.log('--- Тест 4: КОЛОННА 2400x3000 => 7.2 м2 ---');
   const col = calcColumn({ id: 'c1', perimeter: 2400, height: 3000, materialId: 'plaster_g', thickness: 20 });
@@ -2118,12 +2202,11 @@ if (typeof module !== 'undefined' && require.main === module) {
   const roomBadOpening = {
     stage1: {
       height: 2600, length: 5000, width: 3000, workOrder: 'plaster_first',
-      walls: { A: { materialId: 'plaster_c', thicknessPlan: 30, openings: [] } }
+      walls: { A: { materialId: 'plaster_c', thicknessPlan: 30,
+        // опечатка: высота окна ст.2 = 14960 → площадь проёма > стены
+        openings: [{ id: 'ob', type: 'window', s1: { w: 2490, h: 1460 }, s2: { w: 2490, h: 14960 } }] } }
     },
-    stage2: {
-      height: 2600, length: 4900, width: 3000, workOrder: 'plaster_first',
-      walls: { A: { openings: [{ type: 'window', w: 2490, h: 14960 }] } } // опечатка: окно 15 м
-    }
+    stage2: { height: 2600, length: 4900, width: 3000, workOrder: 'plaster_first', walls: {} }
   };
   const wBad = calcWall(roomBadOpening, 'A');
   assertClose('стена: net факт не отрицателен', wBad.fact.net_area_m2 >= 0 ? 1 : 0, 1);
