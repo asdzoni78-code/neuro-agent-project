@@ -12,9 +12,11 @@
   <header class="app-header">
     <h1 class="app-title">СтройАудит</h1>
     <nav class="tabs" id="tabs-desktop" aria-label="Навигация по экранам">
-      <button class="tab is-active" data-screen="screen-rooms" type="button">Помещения</button>
-      <button class="tab" data-screen="screen-measure" type="button">Замер</button>
-      <button class="tab" data-screen="screen-compare" type="button">Сравнение</button>
+      <button class="tab is-active" data-view="rooms" type="button">Помещения</button>
+      <button class="tab" data-view="measure1" type="button">Замер 1 стадии</button>
+      <button class="tab" data-view="summary1" type="button">Итоги 1 стадии</button>
+      <button class="tab" data-view="measure2" type="button">Замер 2 стадии</button>
+      <button class="tab" data-view="compare" type="button">Сравнение</button>
     </nav>
   </header>
 
@@ -31,9 +33,17 @@
 
     <section id="screen-measure" class="screen" aria-label="Замер">
       <div class="screen-inner">
-        <h2 class="screen-title">Замер</h2>
+        <h2 class="screen-title" id="measure-title">Замер</h2>
         <!-- Ф3: содержимое рендерится из app.js → renderMeasure() -->
         <div id="measure-root"></div>
+      </div>
+    </section>
+
+    <section id="screen-summary" class="screen" aria-label="Итоги замеров 1 стадии">
+      <div class="screen-inner">
+        <h2 class="screen-title">Итоги замеров 1 стадии</h2>
+        <!-- Ф8: read-only свод стадии 1 → renderSummary1() -->
+        <div id="summary-root"></div>
       </div>
     </section>
 
@@ -49,42 +59,29 @@
 
   <!-- НИЖНЯЯ ПАНЕЛЬ: 3 кнопки-иконки (мобайл) -->
   <nav class="bottom-nav" id="tabs-mobile" aria-label="Навигация по экранам">
-    <button class="nav-btn is-active" data-screen="screen-rooms" type="button">
+    <button class="nav-btn is-active" data-view="rooms" type="button">
       <span class="nav-icon" aria-hidden="true">🏠</span>
       <span class="nav-label">Помещения</span>
     </button>
-    <button class="nav-btn" data-screen="screen-measure" type="button">
-      <span class="nav-icon" aria-hidden="true">📐</span>
-      <span class="nav-label">Замер</span>
+    <button class="nav-btn" data-view="measure1" type="button">
+      <span class="nav-icon" aria-hidden="true">✏️</span>
+      <span class="nav-label">Замер 1</span>
     </button>
-    <button class="nav-btn" data-screen="screen-compare" type="button">
+    <button class="nav-btn" data-view="summary1" type="button">
+      <span class="nav-icon" aria-hidden="true">📋</span>
+      <span class="nav-label">Итоги 1</span>
+    </button>
+    <button class="nav-btn" data-view="measure2" type="button">
+      <span class="nav-icon" aria-hidden="true">🎯</span>
+      <span class="nav-label">Замер 2</span>
+    </button>
+    <button class="nav-btn" data-view="compare" type="button">
       <span class="nav-icon" aria-hidden="true">📊</span>
       <span class="nav-label">Сравнение</span>
     </button>
   </nav>
 
-  <!-- Переключение экранов (минимальный каркас-скрипт Ф0).
-       В следующих фазах навигация переедет в app.js. -->
-  <script>
-    (function () {
-      function switchScreen(screenId) {
-        // Показать нужный экран, скрыть остальные
-        document.querySelectorAll('.screen').forEach(function (s) {
-          s.classList.toggle('is-active', s.id === screenId);
-        });
-        // Подсветить активные пункты навигации (и вкладки, и нижняя панель)
-        document.querySelectorAll('[data-screen]').forEach(function (btn) {
-          btn.classList.toggle('is-active', btn.dataset.screen === screenId);
-        });
-      }
-
-      document.querySelectorAll('[data-screen]').forEach(function (btn) {
-        btn.addEventListener('click', function () {
-          switchScreen(btn.dataset.screen);
-        });
-      });
-    })();
-  </script>
+  <!-- Навигация теперь в app.js (showView/bindNav) — Ф8. -->
 
   <!-- Логика приложения. Порядок важен: config → app → ai-agent -->
   <script src="config.js"></script>

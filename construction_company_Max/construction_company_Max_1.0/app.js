@@ -109,6 +109,7 @@ function save() {
 function renderAll() {
   if (typeof renderRooms === 'function')      renderRooms();      // Экран 1 — Ф3
   if (typeof renderMeasure === 'function')    renderMeasure();    // Экран 2 — Ф3
+  if (typeof renderSummary1 === 'function')   renderSummary1();   // Итоги ст.1 — Ф8
   if (typeof renderComparison === 'function') renderComparison(); // Экран 3 — Ф4
 }
 
@@ -615,6 +616,7 @@ function calcProject() {
 
 let currentRoomId = null;   // id выбранного помещения (экран 2)
 let currentStage = 1;       // редактируемая стадия: 1 | 2
+let currentView = 'rooms';  // активный раздел навигации (Ф8)
 // Какие «гармошки» стен раскрыты (ключ A/B/V/G → true). Запоминаем, чтобы
 // перерисовка формы (после выбора материала/добавления проёма) не схлопывала
 // открытую стену — иначе прораб терял место, где работал (пункт 4).
@@ -627,14 +629,57 @@ function esc(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
-// showScreen(id) — переключение экрана из кода (та же логика, что в Ф0-скрипте,
-// но доступно из app.js, чтобы клик по помещению открывал экран «Замер»).
-function showScreen(screenId) {
+// ---- Навигация (Ф8): 5 разделов, каждый — своё представление view. ----
+// measure1/measure2 показывают один экран #screen-measure с currentStage 1/2.
+const VIEW_SCREEN = {
+  rooms: 'screen-rooms',
+  measure1: 'screen-measure',
+  summary1: 'screen-summary',
+  measure2: 'screen-measure',
+  compare: 'screen-compare'
+};
+
+// showView(view) — переключить раздел: выставить стадию, показать нужный экран,
+// подсветить активную вкладку, отрисовать содержимое.
+function showView(view) {
+  if (!VIEW_SCREEN[view]) view = 'rooms';
+
+  // Переход на «Замер 2 стадии» из незаблокированной ст.1 — подтверждение и замок
+  // (пункт 5). При отказе остаёмся на текущем разделе.
+  if (view === 'measure2') {
+    const found = currentRoomId ? findRoom(currentRoomId) : null;
+    if (found && !found.room.locked) {
+      const ok = confirm('Все размеры Стадии 1 внесены?\n\n'
+        + 'После перехода к Стадии 2 изменить их будет нельзя '
+        + '(при необходимости можно разблокировать вручную).');
+      if (!ok) return;
+      found.room.locked = true;
+      save();
+    }
+  }
+
+  currentView = view;
+  if (view === 'measure1') currentStage = 1;
+  else if (view === 'measure2') currentStage = 2;
+
+  const screenId = VIEW_SCREEN[view];
   document.querySelectorAll('.screen').forEach(function (s) {
     s.classList.toggle('is-active', s.id === screenId);
   });
-  document.querySelectorAll('[data-screen]').forEach(function (btn) {
-    btn.classList.toggle('is-active', btn.dataset.screen === screenId);
+  document.querySelectorAll('[data-view]').forEach(function (btn) {
+    btn.classList.toggle('is-active', btn.dataset.view === view);
+  });
+
+  if (view === 'rooms') renderRooms();
+  else if (view === 'measure1' || view === 'measure2') renderMeasure();
+  else if (view === 'summary1') renderSummary1();
+  else if (view === 'compare') renderComparison();
+}
+
+// bindNav — навесить обработчики на все кнопки навигации ([data-view]).
+function bindNav() {
+  document.querySelectorAll('[data-view]').forEach(function (btn) {
+    btn.addEventListener('click', function () { showView(btn.dataset.view); });
   });
 }
 
@@ -747,7 +792,8 @@ function stageFilled(stage) {
 if (typeof document !== 'undefined' && document.addEventListener) {
   document.addEventListener('DOMContentLoaded', function () {
     load();
-    renderAll();
+    bindNav();
+    showView('rooms'); // стартовый раздел
   });
 }
 
@@ -891,8 +937,7 @@ function bindRoomsEvents(root) {
       currentRoomId = btn.dataset.roomId;
       currentStage = 1;
       openWalls = {}; // новое помещение — все стены свёрнуты
-      renderMeasure();
-      showScreen('screen-measure');
+      showView('measure1');
     }
   });
 }
@@ -945,6 +990,9 @@ function renderMeasure() {
   const s1 = room.stage1;
   const s = (currentStage === 2) ? room.stage2 : room.stage1;
   const isS2 = currentStage === 2;
+
+  const measureTitle = document.getElementById('measure-title');
+  if (measureTitle) measureTitle.textContent = isS2 ? 'Замер 2 стадии' : 'Замер 1 стадии';
   const locked = !!room.locked;              // ст.1 заблокирована (пункт 5)
   // Стадия 1 после блокировки — только чтение; на ст.2 select-ы описания тоже
   // read-only (материалы/план.толщина задаются на ст.1).
@@ -953,14 +1001,12 @@ function renderMeasure() {
 
   let html = '';
 
-  // 1. Заголовок + переключатель стадий.
+  // 1. Заголовок (стадию выбирает навигация — Ф8).
   html += '<div class="measure-top">';
   html += '<input class="txt room-title" type="text" data-role="room-name" '
     + 'value="' + esc(room.name) + '" placeholder="Название помещения">';
-  html += '<div class="stage-switch" role="tablist">'
-    + '<button type="button" class="stage-btn' + (!isS2 ? ' is-active' : '') + '" data-role="stage" data-stage="1">Стадия 1</button>'
-    + '<button type="button" class="stage-btn' + (isS2 ? ' is-active' : '') + '" data-role="stage" data-stage="2">Стадия 2</button>'
-    + '</div>';
+  html += '<span class="stage-indicator ' + (isS2 ? 'st2' : 'st1') + '">'
+    + (isS2 ? 'Стадия 2 · факт' : 'Стадия 1 · план') + '</span>';
   html += '<button type="button" class="btn btn-sm btn-ghost" data-role="back">← К помещениям</button>';
   // Кнопка разблокировки — ВНЕ отключаемого блока, иначе была бы тоже неактивна.
   if (locked) {
@@ -1469,27 +1515,9 @@ function bindMeasureEvents(root) {
     if (!btn) return;
     const role = btn.dataset.role;
 
-    // stage/back не требуют контекста комнаты.
-    if (role === 'stage') {
-      const target = (btn.dataset.stage === '2') ? 2 : 1;
-      // Первый переход на ст.2 — подтверждение и блокировка ст.1 (пункт 5).
-      if (target === 2) {
-        const c0 = ctx();
-        if (c0 && !c0.room.locked) {
-          const ok = confirm('Все размеры Стадии 1 внесены?\n\n'
-            + 'После перехода к Стадии 2 изменить их будет нельзя '
-            + '(при необходимости можно разблокировать вручную).');
-          if (!ok) return;
-          c0.room.locked = true;
-          save();
-        }
-      }
-      currentStage = target;
-      renderMeasure();
-      return;
-    } else if (role === 'back') {
-      renderRooms();
-      showScreen('screen-rooms');
+    // Назад к списку помещений (стадии переключает верхняя/нижняя навигация — Ф8).
+    if (role === 'back') {
+      showView('rooms');
       return;
     }
 
@@ -1517,6 +1545,88 @@ function bindMeasureEvents(root) {
       persist();
     }
   });
+}
+
+// ============================================================================
+// Ф8. ЭКРАН «Итоги замеров 1 стадии» (#summary-root) — только просмотр.
+// Показывает свод стадии 1 по выбранному помещению: общие размеры, порядок работ
+// (предварительно), пол, потолок-заглушку, стены с толщинами, проёмы (с указанием
+// стены) и колонны. Данные не редактируются — правки на «Замер 1 стадии».
+// ============================================================================
+
+function sumDash(v) { return (v === '' || v == null) ? '—' : v; }
+function sumMatName(id) { const m = materialById(id); return (m && m.name) ? m.name : ''; }
+function sumBlock(title, inner) {
+  return '<fieldset class="block sum-block"><legend>' + esc(title) + '</legend>' + inner + '</fieldset>';
+}
+function sumRow(label, value) {
+  return '<div class="sum-row"><span class="sum-k">' + esc(label) + '</span>'
+    + '<span class="sum-v">' + esc(sumDash(value)) + '</span></div>';
+}
+function sumOpSizes(op) {
+  const s = op.s1 || {};
+  if (op.type === 'window_balcony') {
+    return 'окно ' + sumDash(s.w) + '×' + sumDash(s.h) + ', дверь ' + sumDash(s.doorW) + '×' + sumDash(s.doorH) + ' мм';
+  }
+  return sumDash(s.w) + '×' + sumDash(s.h) + ' мм';
+}
+
+function renderSummary1() {
+  const root = document.getElementById('summary-root');
+  if (!root) return;
+
+  const found = currentRoomId ? findRoom(currentRoomId) : null;
+  if (!found) {
+    root.innerHTML = '<p class="hint">Выберите помещение на экране «Помещения» — здесь появится свод его замеров стадии 1.</p>';
+    return;
+  }
+
+  const room = found.room;
+  ensureStage(room, 1);
+  const s1 = room.stage1;
+  const WO = { screed_first: 'Стяжка раньше', plaster_first: 'Штукатурка раньше', unknown: 'Не указано' };
+
+  let h = '<div class="sum-room">' + esc(room.name) + '</div>';
+  h += '<p class="hint hint-sm">Только просмотр. Изменить размеры можно на «Замер 1 стадии».</p>';
+
+  h += sumBlock('Общие размеры, мм',
+    sumRow('Высота', s1.height) + sumRow('Длина А→В', s1.length) + sumRow('Ширина Б→Г', s1.width));
+
+  h += sumBlock('Порядок работ (предварительно)',
+    '<div class="sum-line">' + esc(WO[s1.workOrder] || WO.unknown) + '</div>');
+
+  const fl = s1.floor || {};
+  h += sumBlock('Пол',
+    sumRow('Материал', sumMatName(fl.materialId)) + sumRow('План.толщина, мм', fl.thicknessPlan));
+
+  h += sumBlock('Потолок', '<div class="sum-line hint-sm">Не активен в пилоте.</div>');
+
+  let wallsHtml = '';
+  ['A', 'B', 'V', 'G'].forEach(function (k) {
+    const w = (s1.walls && s1.walls[k]) || {};
+    wallsHtml += '<div class="sum-subhead">' + esc(WALL_LABELS[k]) + '</div>';
+    wallsHtml += sumRow('Материал', sumMatName(w.materialId)) + sumRow('План.толщина, мм', w.thicknessPlan);
+    const ops = Array.isArray(w.openings) ? w.openings : [];
+    ops.forEach(function (op) {
+      wallsHtml += '<div class="sum-op"><b>' + esc(OPENING_LABELS[op.type] || 'Проём') + '</b> · '
+        + esc(sumOpSizes(op)) + ' · откос: ' + esc(sumMatName(op.materialId) || '—')
+        + ', глубина ' + esc(sumDash(op.depth)) + ' мм, план ' + esc(sumDash(op.thicknessPlan))
+        + ' мм, периметр ' + esc(mm(opPerimeter(op))) + ' мм'
+        + (op.sharedCounted === false ? ' · <i>общий (учтён в смежном)</i>' : '') + '</div>';
+    });
+  });
+  h += sumBlock('Стены и проёмы', wallsHtml);
+
+  const cols = Array.isArray(s1.columns) ? s1.columns : [];
+  let colsHtml = cols.length ? '' : '<div class="sum-line hint-sm">Нет колонн.</div>';
+  cols.forEach(function (c, i) {
+    colsHtml += '<div class="sum-op">Колонна ' + (i + 1) + ': периметр ' + esc(sumDash(c.perimeter))
+      + ' мм, высота ' + esc(sumDash(c.height)) + ' мм, ' + esc(sumMatName(c.materialId) || '—')
+      + ', толщина ' + esc(sumDash(c.thickness)) + ' мм</div>';
+  });
+  h += sumBlock('Колонны', colsHtml);
+
+  root.innerHTML = h;
 }
 
 // ============================================================================

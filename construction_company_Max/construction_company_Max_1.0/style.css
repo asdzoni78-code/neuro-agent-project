@@ -609,3 +609,37 @@ body.ai-modal-open { overflow: hidden; }
 .mat-table td { vertical-align: middle; }
 .mat-table input { width: 100%; }
 .mat-table .mat-num { text-align: right; }
+
+/* ============================================================
+   Ф8 — навигация 5 разделов, индикатор стадии, экран «Итоги ст.1»
+   ============================================================ */
+
+/* Индикатор текущей стадии в шапке экрана «Замер». */
+.stage-indicator {
+  font-size: var(--fs-sm); font-weight: 600;
+  padding: 4px 10px; border-radius: var(--radius); white-space: nowrap;
+}
+.stage-indicator.st1 { background: rgba(37, 99, 235, .1); color: var(--primary-dark); }
+.stage-indicator.st2 { background: rgba(249, 115, 22, .12); color: #9a3412; }
+
+/* Нижняя панель на 5 пунктов — компактнее подписи/иконки. */
+.bottom-nav .nav-btn { padding: 2px; }
+.bottom-nav .nav-icon { font-size: 18px; }
+.bottom-nav .nav-label { font-size: 10px; white-space: nowrap; }
+
+/* Экран «Итоги замеров 1 стадии» (только просмотр). */
+.sum-room { font-size: var(--fs-lg); font-weight: 700; margin-bottom: var(--gap-xs); }
+.sum-block { }
+.sum-row {
+  display: flex; justify-content: space-between; gap: var(--gap-md);
+  padding: 5px 0; border-bottom: 1px solid var(--border);
+}
+.sum-row:last-child { border-bottom: none; }
+.sum-k { color: var(--text-muted); }
+.sum-v { font-weight: 500; text-align: right; }
+.sum-subhead { font-weight: 600; margin: var(--gap-sm) 0 var(--gap-xs); }
+.sum-line { padding: 4px 0; }
+.sum-op {
+  font-size: var(--fs-sm); padding: 5px 0 5px var(--gap-md);
+  border-left: 2px solid var(--border); margin: var(--gap-xs) 0;
+}
