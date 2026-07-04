@@ -390,25 +390,42 @@ function calcOpening(op) {
 }
 
 // ----------------------------------------------------------------------------
-// 4) calcColumn(column) — КОЛОННА
-//   area_m2 = (perimeter × height) / 1e6
+// 4) calcColumn(column, room) — КОЛОННА (двухстадийная, Ф9)
+//   Периметр замеряется на ст.1 и ст.2 (после штукатурки колонна толще).
+//   area   = периметр × высота / 1e6 (план — по ст.1, факт — по ст.2)
+//   высота — с учётом порядка работ (эталон ст.2): screed_first → высота ст.2
+//            (от чернового пола ниже), иначе высота ст.1.
+//   План.толщина = thicknessPlan;
+//   Факт.толщина = (периметр_ст2 − периметр_ст1) / 4   (решение заказчика).
 //   consumption_t = area × (толщина_мм/10) × норма / 1000
-// Как и откос — одна толщина на план и факт.
 // ----------------------------------------------------------------------------
-function calcColumn(column) {
+function calcColumn(column, room) {
   const c = (column && typeof column === 'object') ? column : {};
   const mat = materialById(c.materialId);
-  const area_m2 = (num(c.perimeter) * num(c.height)) / 1000000;
-  const cons = consumption(area_m2, num(c.thickness), mat.norm);
+  const s1 = stageOf(room, 1), s2 = stageOf(room, 2);
+  const workOrder = s2.workOrder || s1.workOrder || 'unknown';
+
+  const perim1 = num(c.perimeter1);
+  const perim2 = num(c.perimeter2);
+  const h1 = num(c.height1);
+  const h2 = num(c.height2);
+  const heightFact = (workOrder === 'screed_first' && h2 > 0) ? h2 : h1;
+
+  const planArea = perim1 * h1 / 1000000;
+  const factArea = (perim2 > 0 ? perim2 : perim1) * heightFact / 1000000;
+
+  const planThk = num(c.thicknessPlan);
+  const factThk = (perim1 > 0 && perim2 > 0) ? (perim2 - perim1) / 4 : planThk;
+
   return {
     surface: 'column',
     id: c.id || null,
     materialId: c.materialId || null,
     materialName: mat.name,
-    area_m2: area_m2,
-    thickness_mm: num(c.thickness),
-    plan: { consumption_t: cons },
-    fact: { consumption_t: cons }
+    area_m2: factArea,
+    thickness_mm: planThk,
+    plan: { thickness_mm: planThk, consumption_t: consumption(planArea, planThk, mat.norm) },
+    fact: { thickness_mm: factThk, consumption_t: consumption(factArea, factThk, mat.norm) }
   };
 }
 
@@ -451,9 +468,9 @@ function calcRoom(room) {
     });
   });
 
-  // Колонны.
+  // Колонны (двухстадийные, нужен room для порядка работ).
   (Array.isArray(s1.columns) ? s1.columns : []).forEach(function (col) {
-    if (col && col.materialId) surfaces.push(calcColumn(col));
+    if (col && col.materialId) surfaces.push(calcColumn(col, r));
   });
 
   // Группировка по материалу: план и факт суммируются раздельно по каждому id.
@@ -761,6 +778,12 @@ function ensureOpening(op) {
   return op;
 }
 
+// newColumn() — новая колонна (Ф9). Периметр и высота замеряются на ст.1 и ст.2;
+// толщина факта = (perimeter2 − perimeter1) / 4.
+function newColumn() {
+  return { id: uuid(), materialId: '', thicknessPlan: '', perimeter1: '', height1: '', perimeter2: '', height2: '' };
+}
+
 // ensureStage(room, n) — гарантировать, что у комнаты есть корректная стадия n
 // с полной структурой (на случай данных из старых версий).
 function ensureStage(room, n) {
@@ -1053,12 +1076,15 @@ function renderMeasure() {
   const floorDesc = s1.floor || { materialId: '', thicknessPlan: '' };
   html += '<fieldset class="block"><legend>Пол</legend><div class="grid-2">';
   html += '<div class="field"><label class="field-label">Материал</label>'
-    + '<select class="sel" data-role="floor-material"' + dis + '>' + materialOptions(floorDesc.materialId) + '</select></div>';
+    + '<select class="sel" data-role="floor-material">' + materialOptions(floorDesc.materialId) + '</select></div>';
   if (isS2) {
     const fThick = num(s1.height) - num(room.stage2.height); // Δвысот в мм
-    html += '<div class="field"><label class="field-label">Толщина (факт), мм</label>'
+    const fPlan = num((s1.floor || {}).thicknessPlan);
+    const fmk = thickState(fThick, fPlan);
+    html += '<div class="field"><label class="field-label">Толщина (факт), мм '
+      + '<span class="thick-marker ' + markerDotClass(fmk.state) + '" data-floor-marker title="' + esc(fmk.title) + '"></span></label>'
       + '<input class="txt auto" type="text" data-role="floor-thick-auto" value="' + esc(mm(fThick)) + '" readonly>'
-      + '<span class="unit-note">' + esc(mm(fThick / 10)) + ' см · авторасчёт (Δвысот)</span></div>';
+      + '<span class="unit-note" data-floor-note>план ' + esc(mm(fPlan)) + ' мм · ' + esc(fmk.note) + '</span></div>';
   } else {
     html += '<div class="field"><label class="field-label">План.толщина, мм</label>'
       + '<input class="txt" type="text" inputmode="numeric" data-role="floor-thick-plan" value="' + esc(floorDesc.thicknessPlan) + '" placeholder="напр. 60"></div>';
@@ -1078,8 +1104,8 @@ function renderMeasure() {
 
   // 7. Откосы теперь внутри стен (как свойство проёма) — отдельной секции нет (Ф7).
 
-  // 8. Колонны (тоже из stage1).
-  html += renderColumns(s1, isS2);
+  // 8. Колонны (двухстадийные, из stage1.columns).
+  html += renderColumns(room, isS2);
 
   // 9. Ответственный.
   html += '<fieldset class="block"><legend>Ответственный</legend>'
@@ -1242,7 +1268,8 @@ function renderOpening(op, key, isS2) {
     const calc = calcOpening(op);
     const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
     h += '<div class="field"><label class="field-label">Материал откоса</label>'
-      + '<input class="txt txt-sm" type="text" value="' + esc(mat.name || '—') + '" readonly></div>';
+      + '<select class="sel sel-sm" data-role="op-material" data-wall="' + key + '" data-op-id="' + esc(id) + '">'
+      + materialOptions(op.materialId) + '</select></div>';
     h += opField('Ширина проёма ст.1', 'op-s1w', key, id, s1.w, true);
     h += opField('Высота проёма ст.1', 'op-s1h', key, id, s1.h, true);
     h += opField('Ширина проёма ст.2', 'op-s2w', key, id, s2.w, false);
@@ -1273,9 +1300,9 @@ function renderWallBlock(room, key, isS2) {
     + '><summary>' + esc(WALL_LABELS[key]) + '</summary>';
   h += '<div class="wall-body">';
 
-  // Материал (описание — ст.1).
+  // Материал — редактируется на обеих стадиях (#12).
   h += '<div class="grid-2"><div class="field"><label class="field-label">Материал</label>'
-    + '<select class="sel" data-role="wall-material" data-wall="' + key + '"' + dis + '>'
+    + '<select class="sel" data-role="wall-material" data-wall="' + key + '">'
     + materialOptions(wallDesc.materialId) + '</select></div>';
 
   // Толщина.
@@ -1285,9 +1312,12 @@ function renderWallBlock(room, key, isS2) {
       ? (num(s1.length) - num(room.stage2.length)) / 2
       : (num(s1.width) - num(room.stage2.width)) / 2;
     const src = isAV ? '(Δдлины÷2)' : '(Δширины÷2)';
-    h += '<div class="field"><label class="field-label">Толщина (факт), мм</label>'
+    const wPlan = num(wallDesc.thicknessPlan);
+    const wmk = thickState(t, wPlan);
+    h += '<div class="field"><label class="field-label">Толщина (факт), мм '
+      + '<span class="thick-marker ' + markerDotClass(wmk.state) + '" data-wall-marker="' + key + '" title="' + esc(wmk.title) + '"></span></label>'
       + '<input class="txt auto" type="text" value="' + esc(mm(t)) + '" readonly>'
-      + '<span class="unit-note">авторасчёт ' + src + '</span></div>';
+      + '<span class="unit-note" data-wall-note="' + key + '">план ' + esc(mm(wPlan)) + ' мм · ' + src + ' · ' + esc(wmk.note) + '</span></div>';
   } else {
     h += '<div class="field"><label class="field-label">План.толщина, мм</label>'
       + '<input class="txt" type="text" inputmode="numeric" data-role="wall-thick-plan" data-wall="' + key + '" '
@@ -1307,22 +1337,60 @@ function renderWallBlock(room, key, isS2) {
   return h;
 }
 
-// renderColumns — список колонн (данные в stage1).
-function renderColumns(s1, isS2) {
+// colField — компактное числовое поле колонны (адресуется data-id).
+function colField(label, role, id, value, readOnly) {
+  return '<div class="field"><label class="field-label">' + esc(label) + '</label>'
+    + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="' + role + '" data-id="' + esc(id) + '" '
+    + 'value="' + esc(value) + '" placeholder="мм"' + (readOnly ? ' readonly' : '') + '></div>';
+}
+
+// renderColumnItem(c, i, isS2, room) — карточка колонны.
+//   ст.1: материал, периметр ст.1, высота ст.1, план.толщина.
+//   ст.2: материал (редактируется, #12) + периметр/высота ст.2 + авторасчёт
+//         фактической толщины (Δпериметра/4) и цветной маркер (#13).
+function renderColumnItem(c, i, isS2, room) {
+  const id = c.id;
+  let h = '<div class="slope-card" data-col-id="' + esc(id) + '">';
+  h += '<div class="slope-head"><span class="slope-title">Колонна ' + (i + 1) + '</span>';
+  if (!isS2) {
+    h += '<button class="btn-icon btn-danger" type="button" data-role="del-col" data-id="' + esc(id) + '" title="Удалить колонну">✕</button>';
+  }
+  h += '</div><div class="slope-grid">';
+
+  // Материал — редактируется на обеих стадиях (#12).
+  h += '<div class="field"><label class="field-label">Материал</label>'
+    + '<select class="sel sel-sm" data-role="col-material" data-id="' + esc(id) + '">' + materialOptions(c.materialId) + '</select></div>';
+
+  if (!isS2) {
+    h += colField('Периметр ст.1, мм', 'col-perim1', id, c.perimeter1, false);
+    h += colField('Высота ст.1, мм', 'col-h1', id, c.height1, false);
+    h += colField('План.толщина, мм', 'col-thick-plan', id, c.thicknessPlan, false);
+  } else {
+    const calc = calcColumn(c, room);
+    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
+    h += colField('Периметр ст.1, мм', 'col-perim1', id, c.perimeter1, true);
+    h += colField('Высота ст.1, мм', 'col-h1', id, c.height1, true);
+    h += colField('План.толщина, мм', 'col-thick-plan', id, mm(calc.plan.thickness_mm), true);
+    h += colField('Периметр ст.2, мм', 'col-perim2', id, c.perimeter2, false);
+    h += colField('Высота ст.2, мм', 'col-h2', id, c.height2, false);
+    h += '<div class="field"><label class="field-label">Толщина (факт), мм '
+      + '<span class="thick-marker ' + markerDotClass(mk.state) + '" data-col-marker="' + esc(id) + '" title="' + esc(mk.title) + '"></span></label>'
+      + '<input class="txt auto" type="text" data-col-auto="' + esc(id) + '" value="' + esc(mm(calc.fact.thickness_mm)) + '" readonly>'
+      + '<span class="unit-note" data-col-note="' + esc(id) + '">' + esc(mk.note) + '</span></div>';
+  }
+
+  h += '</div></div>';
+  return h;
+}
+
+// renderColumns(room, isS2) — список колонн (данные в stage1.columns).
+function renderColumns(room, isS2) {
+  const s1 = room.stage1;
   const cols = Array.isArray(s1.columns) ? s1.columns : [];
-  const dis = isS2 ? ' disabled' : '';
   let h = '<fieldset class="block"><legend>Колонны</legend>';
-  if (isS2) h += '<p class="hint hint-sm">Колонны задаются на ст.1 (общий элемент).</p>';
+  h += '<p class="hint hint-sm">Толщина факта = (периметр ст.2 − периметр ст.1) / 4.</p>';
   if (!cols.length) h += '<p class="hint hint-sm">Нет колонн.</p>';
-  cols.forEach(function (c) {
-    h += '<div class="line-item" data-col-id="' + esc(c.id) + '">'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="col-perimeter" data-id="' + esc(c.id) + '" value="' + esc(c.perimeter) + '" placeholder="периметр, мм"' + dis + '>'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="col-height" data-id="' + esc(c.id) + '" value="' + esc(c.height) + '" placeholder="высота, мм"' + dis + '>'
-      + '<select class="sel sel-sm" data-role="col-material" data-id="' + esc(c.id) + '"' + dis + '>' + materialOptions(c.materialId) + '</select>'
-      + '<input class="txt txt-sm" type="text" inputmode="numeric" data-role="col-thick" data-id="' + esc(c.id) + '" value="' + esc(c.thickness) + '" placeholder="толщ., мм"' + dis + '>'
-      + '<button class="btn-icon btn-danger" type="button" data-role="del-col" data-id="' + esc(c.id) + '" title="Удалить колонну"' + dis + '>✕</button>'
-      + '</div>';
-  });
+  cols.forEach(function (c, i) { h += renderColumnItem(c, i, isS2, room); });
   if (!isS2) h += '<button class="btn btn-sm" type="button" data-role="add-col">+ Колонна</button>';
   h += '</fieldset>';
   return h;
@@ -1339,18 +1407,27 @@ function updateAutoFields(root, room) {
   if (floorAuto) {
     const fThick = num(s1.height) - num(s2.height);
     floorAuto.value = mm(fThick);
-    const note = floorAuto.parentNode.querySelector('.unit-note');
-    if (note) note.textContent = mm(fThick / 10) + ' см · авторасчёт (Δвысот)';
+    const fPlan = num((s1.floor || {}).thicknessPlan);
+    const fmk = thickState(fThick, fPlan);
+    setMarker(root.querySelector('[data-floor-marker]'), fmk);
+    const note = root.querySelector('[data-floor-note]');
+    if (note) note.textContent = 'план ' + mm(fPlan) + ' мм · ' + fmk.note;
   }
   root.querySelectorAll('.wall[data-wall]').forEach(function (w) {
     const key = w.dataset.wall;
     const isAV = (key === 'A' || key === 'V');
-    const auto = w.querySelector('.txt.auto');
+    const auto = w.querySelector('.txt.auto'); // первый — авторасчёт толщины стены
     if (auto) {
       const t = isAV
         ? (num(s1.length) - num(s2.length)) / 2
         : (num(s1.width) - num(s2.width)) / 2;
       auto.value = mm(t);
+      const wPlan = num((s1.walls[key] || {}).thicknessPlan);
+      const wmk = thickState(t, wPlan);
+      setMarker(w.querySelector('[data-wall-marker]'), wmk);
+      const wnote = w.querySelector('[data-wall-note]');
+      const src = isAV ? '(Δдлины÷2)' : '(Δширины÷2)';
+      if (wnote) wnote.textContent = 'план ' + mm(wPlan) + ' мм · ' + src + ' · ' + wmk.note;
     }
   });
 
@@ -1370,6 +1447,20 @@ function updateAutoFields(root, room) {
     const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
     setMarker(root.querySelector('[data-op-marker="' + cssEsc(id) + '"]'), mk);
     const note = root.querySelector('[data-op-note="' + cssEsc(id) + '"]');
+    if (note) note.textContent = mk.note;
+  });
+
+  // Колонны: пересчёт фактической толщины (Δпериметра/4) + маркер (пункты 6, 13).
+  const cols = Array.isArray(s1.columns) ? s1.columns : [];
+  root.querySelectorAll('[data-col-auto]').forEach(function (el) {
+    const id = el.dataset.colAuto;
+    const col = cols.find(function (x) { return x.id === id; });
+    if (!col) return;
+    const calc = calcColumn(col, room);
+    el.value = mm(calc.fact.thickness_mm);
+    const mk = thickState(calc.fact.thickness_mm, calc.plan.thickness_mm);
+    setMarker(root.querySelector('[data-col-marker="' + cssEsc(id) + '"]'), mk);
+    const note = root.querySelector('[data-col-note="' + cssEsc(id) + '"]');
     if (note) note.textContent = mk.note;
   });
 
@@ -1458,11 +1549,13 @@ function bindMeasureEvents(root) {
     } else if (role === 'op-depth' || role === 'op-thick-plan') {
       const op = findOpening(s1, el.dataset.wall, el.dataset.opId);
       if (op) op[role === 'op-depth' ? 'depth' : 'thicknessPlan'] = el.value;
-    } else if (role === 'col-perimeter' || role === 'col-height' || role === 'col-thick') {
-      const c = s1.columns.find(function (x) { return x.id === el.dataset.id; });
-      if (c) {
-        const map = { 'col-perimeter': 'perimeter', 'col-height': 'height', 'col-thick': 'thickness' };
-        c[map[role]] = el.value;
+    } else if (role === 'col-perim1' || role === 'col-h1' || role === 'col-perim2'
+            || role === 'col-h2' || role === 'col-thick-plan') {
+      const col = s1.columns.find(function (x) { return x.id === el.dataset.id; });
+      if (col) {
+        const map = { 'col-perim1': 'perimeter1', 'col-h1': 'height1', 'col-perim2': 'perimeter2',
+          'col-h2': 'height2', 'col-thick-plan': 'thicknessPlan' };
+        col[map[role]] = el.value;
       }
     } else {
       handled = false;
@@ -1538,7 +1631,7 @@ function bindMeasureEvents(root) {
       if (i > -1) arr.splice(i, 1);
       persist();
     } else if (role === 'add-col') {
-      s1.columns.push({ id: uuid(), perimeter: '', height: '', materialId: '', thickness: '' });
+      s1.columns.push(newColumn());
       persist();
     } else if (role === 'del-col') {
       s1.columns = s1.columns.filter(function (x) { return x.id !== btn.dataset.id; });
@@ -2229,9 +2322,13 @@ if (typeof module !== 'undefined' && require.main === module) {
   assertClose('общий проём: план откоса = 0', rShared.plan.consumption_t, 0);
   assertClose('общий проём: факт откоса = 0', rShared.fact.consumption_t, 0);
 
-  console.log('--- Тест 4: КОЛОННА 2400x3000 => 7.2 м2 ---');
-  const col = calcColumn({ id: 'c1', perimeter: 2400, height: 3000, materialId: 'plaster_g', thickness: 20 });
-  assertClose('колонна площадь м2', col.area_m2, 7.2);                  // 2400*3000/1e6
+  console.log('--- Тест 4: КОЛОННА двухстадийная (толщина = Δпериметра/4) ---');
+  const colRoom = { stage1: { workOrder: 'plaster_first' }, stage2: { workOrder: 'plaster_first' } };
+  const col = calcColumn({ id: 'c1', materialId: 'plaster_g', thicknessPlan: 20,
+    perimeter1: 2400, height1: 3000, perimeter2: 2480, height2: 3000 }, colRoom);
+  assertClose('колонна факт толщина = Δпериметра/4', col.fact.thickness_mm, 20);   // (2480-2400)/4
+  assertClose('колонна факт площадь (периметр ст.2 × высота)', col.area_m2, 7.44); // 2480*3000/1e6
+  assertClose('колонна план расход', col.plan.consumption_t, 0.1224);             // 7.2*2*8.5/1000
 
   console.log('--- Тест 5: calcRoom — материалы не смешиваются ---');
   const mixRoom = {
