@@ -1814,11 +1814,13 @@ function renderSummary1() {
   const cols = Array.isArray(s1.columns) ? s1.columns : [];
   let colsHtml = cols.length ? '' : '<div class="sum-line hint-sm">Нет колонн.</div>';
   cols.forEach(function (c, i) {
-    colsHtml += '<div class="sum-op">Колонна ' + (i + 1) + ': периметр ' + esc(sumDash(c.perimeter))
-      + ' мм, высота ' + esc(sumDash(c.height)) + ' мм, ' + esc(sumMatName(c.materialId) || '—')
-      + ', толщина ' + esc(sumDash(c.thickness)) + ' мм</div>';
+    colsHtml += '<div class="sum-op">Колонна ' + (i + 1) + ': периметр ст.1 ' + esc(sumDash(c.perimeter1))
+      + ' мм, высота ст.1 ' + esc(sumDash(c.height1)) + ' мм, ' + esc(sumMatName(c.materialId) || '—')
+      + ', план.толщина ' + esc(sumDash(c.thicknessPlan)) + ' мм</div>';
   });
   h += sumBlock('Колонны', colsHtml);
+
+  h += sumBlock('Ответственный', '<div class="sum-line">' + esc(sumDash(s1.responsible)) + '</div>');
 
   root.innerHTML = h;
 }
