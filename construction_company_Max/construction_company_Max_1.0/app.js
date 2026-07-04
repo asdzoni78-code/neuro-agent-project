@@ -2496,9 +2496,10 @@ if (typeof module !== 'undefined' && require.main === module) {
   // Стяжка и штукатурка присутствуют отдельными ключами.
   console.log('  materials: ' + keys.join(', '));
   assertClose('screed_c план_т (пол)', rc.byMaterial['screed_c'].plan_t, 2.4);   // как в тесте 1
-  // Штукатурка стены A: net = 3000*5000/1e6 = 15 м2, толщ 20 мм, norm 8.5
-  // план = 15 * 2 * 8.5 / 1000 = 0.255 т
-  assertClose('plaster_g план_т (стена A)', rc.byMaterial['plaster_g'].plan_t, 0.255);
+  // Штукатурка стены A (AV): высота ст.1 = 3140, длина = 5000 →
+  // net = 3140*5000/1e6 = 15.7 м2, толщ 20 мм, norm 8.5
+  // план = 15.7 * 2 * 8.5 / 1000 = 0.2669 т
+  assertClose('plaster_g план_т (стена A)', rc.byMaterial['plaster_g'].plan_t, 0.2669);
   assertClose('calcRoom ответственный', rc.responsible === 'Иванов' ? 1 : 0, 1);
 
   console.log('--- Тест 6: calcProject — Δ<0 при перерасходе (факт>план) ---');
