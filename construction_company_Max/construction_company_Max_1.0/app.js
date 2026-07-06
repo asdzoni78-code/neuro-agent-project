@@ -33,7 +33,10 @@ function defaultState() {
   return {
     project: { name: 'Объект', floors: [] },
     materials: defaultMaterials(),
-    settings: defaultSettings()
+    settings: defaultSettings(),
+    // Справочник ответственных (Ф13): имена, которые уже вводили. Поле
+    // «Ответственный» подсказывает из этого списка; новое имя добавляется сюда.
+    responsibles: []
   };
 }
 
@@ -84,7 +87,12 @@ function load() {
       settings: (parsed.settings && typeof parsed.settings === 'object'
                  && Number.isFinite(Number(parsed.settings.overrunThresholdPct)))
         ? { overrunThresholdPct: Math.max(0, Number(parsed.settings.overrunThresholdPct)) }
-        : defaultSettings()
+        : defaultSettings(),
+      // Справочник ответственных (Ф13). Мягкая миграция: у старых данных секции
+      // нет → пустой список. Оставляем только непустые строки.
+      responsibles: Array.isArray(parsed.responsibles)
+        ? parsed.responsibles.filter(function (x) { return typeof x === 'string' && x.trim(); })
+        : []
     };
     return state;
   } catch (err) {
@@ -1063,6 +1071,30 @@ function materialOptions(selected) {
   return out;
 }
 
+// addResponsible(name) — добавить имя в справочник ответственных (Ф13), если его
+// там ещё нет (сравнение без учёта регистра). Список держим отсортированным по-русски.
+function addResponsible(name) {
+  const n = String(name == null ? '' : name).trim();
+  if (!n) return;
+  if (!Array.isArray(state.responsibles)) state.responsibles = [];
+  const exists = state.responsibles.some(function (x) { return x.toLowerCase() === n.toLowerCase(); });
+  if (!exists) {
+    state.responsibles.push(n);
+    state.responsibles.sort(function (a, b) { return a.localeCompare(b, 'ru'); });
+  }
+}
+
+// responsiblesDatalistHTML() — <datalist> с ранее введёнными ответственными (Ф13).
+// Привязывается к полю «Ответственный» через list="responsibles-list": браузер
+// сам показывает подсказки по мере ввода.
+function responsiblesDatalistHTML() {
+  const list = Array.isArray(state.responsibles) ? state.responsibles : [];
+  let h = '<datalist id="responsibles-list">';
+  list.forEach(function (n) { h += '<option value="' + esc(n) + '"></option>'; });
+  h += '</datalist>';
+  return h;
+}
+
 // mm(v) — форматирование мм для read-only (1 знак после запятой, без хвостов).
 function mm(v) {
   const n = round(v, 1);
@@ -1276,9 +1308,14 @@ function renderMeasure() {
   // 8. Колонны (двухстадийные, из stage1.columns).
   html += renderColumns(room, isS2);
 
-  // 9. Ответственный.
+  // 9. Ответственный. Поле с автоподбором из справочника (Ф13): начните вводить —
+  //    появятся ранее введённые имена; новое имя добавится в список автоматически.
   html += '<fieldset class="block"><legend>Ответственный</legend>'
-    + '<input class="txt" type="text" data-role="responsible" value="' + esc(s.responsible) + '" placeholder="Фамилия / имя"></fieldset>';
+    + '<input class="txt" type="text" list="responsibles-list" autocomplete="off" '
+    + 'data-role="responsible" value="' + esc(s.responsible) + '" placeholder="Фамилия / имя">'
+    + responsiblesDatalistHTML()
+    + '<span class="unit-note">Начните вводить — появится список ранее введённых. '
+    + 'Новое имя сохранится в списке автоматически.</span></fieldset>';
 
   // 10. Фото — заглушка.
   html += '<fieldset class="block block-muted"><legend>Фото</legend>'
@@ -1769,6 +1806,10 @@ function bindMeasureEvents(root) {
     } else if (role === 'col-material') {
       const c = s1.columns.find(function (x) { return x.id === el.dataset.id; });
       if (c) c.materialId = el.value;
+    } else if (role === 'responsible') {
+      // На потере фокуса фиксируем имя и пополняем справочник (Ф13).
+      s.responsible = el.value;
+      addResponsible(el.value);
     } else {
       return;
     }
@@ -2602,6 +2643,14 @@ if (typeof module !== 'undefined' && require.main === module) {
   assertClose('ответственный ст.2', twoResp.responsible2 === 'Петров' ? 1 : 0, 1);
   assertClose('ответственный комбинированный (разные)',
     twoResp.responsible === 'ст.1 Иванов, ст.2 Петров' ? 1 : 0, 1);
+
+  // Справочник ответственных (Ф13): дедуп без учёта регистра + сортировка, пустые игнор.
+  state = defaultState();
+  addResponsible('Петров'); addResponsible('Иванов');
+  addResponsible('  петров  '); addResponsible(''); addResponsible(null);
+  assertClose('справочник: уникальных имён', state.responsibles.length, 2);
+  assertClose('справочник: отсортирован (Иванов первый)',
+    state.responsibles[0] === 'Иванов' ? 1 : 0, 1);
 
   console.log('--- Тест 6: calcProject — Δ<0 при перерасходе (факт>план) ---');
   // Собираем объект с одной комнатой, где факт пола больше плана.
