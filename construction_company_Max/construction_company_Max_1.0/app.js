@@ -493,10 +493,22 @@ function calcRoom(room) {
     byMaterial[id].fact_t += num(surf.fact && surf.fact.consumption_t);
   });
 
+  // Ответственные могут быть РАЗНЫМИ на ст.1 и ст.2 (замер до/после делают разные
+  // люди) — храним обоих раздельно (responsible1/responsible2). Комбинированный
+  // responsible оставлен для AI-отчёта и старых читателей: если исполнители разные,
+  // показываем обоих с пометкой стадии, иначе — одного.
+  const r1 = s1.responsible || '';
+  const r2 = (stageOf(r, 2).responsible) || '';
+  const responsible = (r1 && r2)
+    ? (r1 === r2 ? r1 : ('ст.1 ' + r1 + ', ст.2 ' + r2))
+    : (r1 || r2 || '');
+
   return {
     id: r.id || null,
     name: r.name || '',
-    responsible: s1.responsible || (stageOf(r, 2).responsible) || '',
+    responsible: responsible,
+    responsible1: r1,
+    responsible2: r2,
     surfaces: surfaces,
     byMaterial: byMaterial
   };
@@ -557,9 +569,10 @@ function calcProject() {
         if (!matAgg[id]) matAgg[id] = { plan_t: 0, fact_t: 0, responsibles: {} };
         matAgg[id].plan_t += bm.plan_t;
         matAgg[id].fact_t += bm.fact_t;
-        // Собираем множество ответственных, которые работали с этим материалом,
-        // чтобы показать их в таблице сравнения на уровне объекта.
-        if (rc.responsible) matAgg[id].responsibles[rc.responsible] = true;
+        // Собираем множество ответственных (обеих стадий), которые работали с этим
+        // материалом, чтобы показать их в таблице сравнения на уровне объекта.
+        if (rc.responsible1) matAgg[id].responsibles[rc.responsible1] = true;
+        if (rc.responsible2) matAgg[id].responsibles[rc.responsible2] = true;
       });
 
       rooms.push({
@@ -567,6 +580,8 @@ function calcProject() {
         roomId: rc.id,
         roomName: rc.name,
         responsible: rc.responsible,
+        responsible1: rc.responsible1,
+        responsible2: rc.responsible2,
         byMaterial: roomMaterials
       });
     });
@@ -680,6 +695,21 @@ function showView(view) {
       if (!ok) return;
       found.room.locked1 = true;
       save();
+    }
+  }
+
+  // «Сравнение» открывается, только когда Стадия 2 СОХРАНЕНА (зафиксирована) во
+  // всех помещениях с данными. Иначе результат считался бы по неполным/неутверждённым
+  // замерам. При отказе остаёмся на текущем разделе.
+  if (view === 'compare') {
+    const notReady = compareBlockers();
+    if (notReady.length) {
+      alert('«Сравнение» откроется, когда Стадия 2 сохранена во всех помещениях.\n\n'
+        + 'Нажмите «✓ Сохранить и зафиксировать Стадию 2» (кнопка появится, когда '
+        + 'заполнены все размеры, материалы, порядок работ и ответственный) в:\n\n• '
+        + notReady.slice(0, 12).join('\n• ')
+        + (notReady.length > 12 ? '\n• … и ещё ' + (notReady.length - 12) : ''));
+      return;
     }
   }
 
@@ -816,6 +846,42 @@ function ensureStage(room, n) {
 function stageFilled(stage) {
   if (!stage || typeof stage !== 'object') return false;
   return num(stage.height) > 0 && num(stage.length) > 0 && num(stage.width) > 0;
+}
+
+// roomHasData(room) — есть ли в помещении хоть какие-то замеры или назначенные
+// материалы (пустое, только что добавленное помещение не должно блокировать
+// «Сравнение», см. compareBlockers).
+function roomHasData(room) {
+  const s1 = (room && room.stage1) || {};
+  if (stageFilled(s1)) return true;
+  if (s1.floor && s1.floor.materialId) return true;
+  let has = false;
+  ['A', 'B', 'V', 'G'].forEach(function (k) {
+    const w = (s1.walls || {})[k] || {};
+    if (w.materialId) has = true;
+    if (Array.isArray(w.openings) && w.openings.length) has = true;
+  });
+  if (has) return true;
+  if (Array.isArray(s1.columns) && s1.columns.length) return true;
+  return false;
+}
+
+// compareBlockers() — список помещений, из-за которых «Сравнение» ещё нельзя
+// открыть: в них есть данные, но Стадия 2 не сохранена (не зафиксирована).
+// Возвращает подписи «Этаж · Помещение».
+function compareBlockers() {
+  const out = [];
+  const floors = (state.project && Array.isArray(state.project.floors)) ? state.project.floors : [];
+  floors.forEach(function (f) {
+    (Array.isArray(f.rooms) ? f.rooms : []).forEach(function (room) {
+      ensureStage(room, 1);
+      ensureStage(room, 2);
+      if (roomHasData(room) && !room.locked2) {
+        out.push((f.name ? f.name + ' · ' : '') + (room.name || 'Помещение'));
+      }
+    });
+  });
+  return out;
 }
 
 // Инициализация: при загрузке страницы — load() затем renderAll().
@@ -1013,11 +1079,18 @@ function measureMissing(room, stage) {
   const s1 = room.stage1;
   const miss = [];
   function need(val, label, sel) { if (!(num(val) > 0)) miss.push({ label: label, sel: sel }); }
+  // needText — обязательное ТЕКСТОВОЕ поле (напр. «Ответственный»): пусто/пробелы → пропуск.
+  function needText(val, label, sel) {
+    if (!String(val == null ? '' : val).trim()) miss.push({ label: label, sel: sel });
+  }
 
   // Общие размеры — всегда обязательны.
   need(s.height, 'Высота', '[data-role="dim"][data-dim="height"]');
   need(s.length, 'Длина А→В', '[data-role="dim"][data-dim="length"]');
   need(s.width, 'Ширина Б→Г', '[data-role="dim"][data-dim="width"]');
+
+  // Ответственный — обязателен на ОБЕИХ стадиях (замер до/после могут делать разные люди).
+  needText(s.responsible, 'Ответственный', '[data-role="responsible"]');
 
   if (stage === 1) {
     const fl = s1.floor || {};
@@ -1043,7 +1116,11 @@ function measureMissing(room, stage) {
       }
     });
   } else {
-    // Стадия 2: размеры проёмов ст.2 и периметр/высота колонн ст.2.
+    // Стадия 2: порядок работ должен быть проставлен (влияет на расчёт высоты стены/пола).
+    if (!s.workOrder || s.workOrder === 'unknown') {
+      miss.push({ label: 'Порядок работ (укажите стяжка/штукатурка раньше)', sel: '[data-block="work-order"]' });
+    }
+    // Размеры проёмов ст.2 и периметр/высота колонн ст.2.
     ['A', 'B', 'V', 'G'].forEach(function (k) {
       const w = s1.walls[k] || {};
       (Array.isArray(w.openings) ? w.openings : []).forEach(function (op) {
@@ -1158,7 +1235,7 @@ function renderMeasure() {
 
   // 3. Порядок работ (radio) — влияет на высоту стены в расчёте.
   const wo = s.workOrder || 'unknown';
-  html += '<fieldset class="block"><legend>Порядок работ</legend><div class="radio-row">'
+  html += '<fieldset class="block" data-block="work-order"><legend>Порядок работ</legend><div class="radio-row">'
     + woRadio('Стяжка раньше', 'screed_first', wo)
     + woRadio('Штукатурка раньше', 'plaster_first', wo)
     + woRadio('Не указано', 'unknown', wo)
@@ -1867,6 +1944,14 @@ function fmtSigned(v, fmt) {
   return (num(v) > 0 ? '+' : '') + s;
 }
 
+// responsiblePairHTML(r1, r2) — раздельное отображение ответственных за ст.1 и ст.2
+// (их могут заполнять разные люди). Пусто с обеих сторон → «—».
+function responsiblePairHTML(r1, r2) {
+  r1 = r1 || ''; r2 = r2 || '';
+  if (!r1 && !r2) return '—';
+  return 'ст.1: ' + (r1 ? esc(r1) : '—') + '<br>ст.2: ' + (r2 ? esc(r2) : '—');
+}
+
 // renderComparison() — точка входа экрана 3. Вызывается из renderAll().
 function renderComparison() {
   const root = document.getElementById('compare-root');
@@ -1953,7 +2038,7 @@ function renderRoomSurfaceTable(data) {
       const title = 'план ' + fmtT(a.plan) + ' → факт ' + fmtT(a.fact) + ' т';
       h += '<td class="num' + cls + '" title="' + esc(title) + '">' + fmtSigned(delta, fmtT) + '</td>';
     });
-    h += '<td>' + (rm.responsible ? esc(rm.responsible) : '—') + '</td></tr>';
+    h += '<td>' + responsiblePairHTML(rm.responsible1, rm.responsible2) + '</td></tr>';
   });
 
   h += '</tbody></table></div></div>';
@@ -2162,8 +2247,11 @@ function renderBreakdown(data) {
 // renderRoomBreakdown(room) — уровень помещения: строки по материалам +
 // вложенный уровень поверхностей (из calcRoom живой комнаты).
 function renderRoomBreakdown(room) {
-  const respPart = room.responsible
-    ? ' <span class="acc-resp">· ' + esc(room.responsible) + '</span>' : '';
+  const respBits = [];
+  if (room.responsible1) respBits.push('ст.1: ' + esc(room.responsible1));
+  if (room.responsible2) respBits.push('ст.2: ' + esc(room.responsible2));
+  const respPart = respBits.length
+    ? ' <span class="acc-resp">· ' + respBits.join(' · ') + '</span>' : '';
   let h = '<details class="acc acc-room"><summary>' + esc(room.roomName || 'Помещение') + respPart + '</summary>';
 
   if (!room.byMaterial.length) {
@@ -2503,6 +2591,17 @@ if (typeof module !== 'undefined' && require.main === module) {
   // план = 15.7 * 2 * 8.5 / 1000 = 0.2669 т
   assertClose('plaster_g план_т (стена A)', rc.byMaterial['plaster_g'].plan_t, 0.2669);
   assertClose('calcRoom ответственный', rc.responsible === 'Иванов' ? 1 : 0, 1);
+
+  // Ответственные ст.1/ст.2 хранятся раздельно (замер до/после делают разные люди).
+  const twoResp = calcRoom({
+    id: 'r4', name: 'Двое',
+    stage1: { height: 3000, length: 4000, width: 3000, responsible: 'Иванов', walls: {}, columns: [] },
+    stage2: { height: 3000, length: 4000, width: 3000, responsible: 'Петров', walls: {} }
+  });
+  assertClose('ответственный ст.1', twoResp.responsible1 === 'Иванов' ? 1 : 0, 1);
+  assertClose('ответственный ст.2', twoResp.responsible2 === 'Петров' ? 1 : 0, 1);
+  assertClose('ответственный комбинированный (разные)',
+    twoResp.responsible === 'ст.1 Иванов, ст.2 Петров' ? 1 : 0, 1);
 
   console.log('--- Тест 6: calcProject — Δ<0 при перерасходе (факт>план) ---');
   // Собираем объект с одной комнатой, где факт пола больше плана.
