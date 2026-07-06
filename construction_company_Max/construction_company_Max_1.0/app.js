@@ -1152,16 +1152,36 @@ function measureMissing(room, stage) {
     if (!s.workOrder || s.workOrder === 'unknown') {
       miss.push({ label: 'Порядок работ (укажите стяжка/штукатурка раньше)', sel: '[data-block="work-order"]' });
     }
-    // Размеры проёмов ст.2 и периметр/высота колонн ст.2.
+
+    // Материал обязателен для КАЖДОЙ задействованной поверхности — без него поверхность
+    // не попадёт в расчёт «Сравнения» (её расход не считается). «Задействована» = задана
+    // план.толщина или замеры поверхности. Материал редактируется и на ст.2.
+    const flr = s1.floor || {};
+    if (num(flr.thicknessPlan) > 0 && !flr.materialId) {
+      miss.push({ label: 'Пол: материал', sel: '[data-role="floor-material"]' });
+    }
+
+    // Материалы стен/откосов + размеры проёмов ст.2.
     ['A', 'B', 'V', 'G'].forEach(function (k) {
       const w = s1.walls[k] || {};
+      if (num(w.thicknessPlan) > 0 && !w.materialId) {
+        miss.push({ label: WALL_LABELS[k] + ': материал', sel: '[data-role="wall-material"][data-wall="' + k + '"]' });
+      }
       (Array.isArray(w.openings) ? w.openings : []).forEach(function (op) {
         const nm = (OPENING_LABELS[op.type] || 'Проём') + ' (' + WALL_LABELS[k] + ')';
+        if ((num(op.thicknessPlan) > 0 || num(op.depth) > 0) && !op.materialId) {
+          miss.push({ label: nm + ': материал откоса', sel: '[data-role="op-material"][data-op-id="' + op.id + '"]' });
+        }
         need(op.s2.w, nm + ': ширина ст.2', '[data-role="op-s2w"][data-op-id="' + op.id + '"]');
         need(op.s2.h, nm + ': высота ст.2', '[data-role="op-s2h"][data-op-id="' + op.id + '"]');
       });
     });
+
+    // Материалы колонн + периметр/высота ст.2.
     (Array.isArray(s1.columns) ? s1.columns : []).forEach(function (c, i) {
+      if ((num(c.thicknessPlan) > 0 || num(c.perimeter1) > 0) && !c.materialId) {
+        miss.push({ label: 'Колонна ' + (i + 1) + ': материал', sel: '[data-role="col-material"][data-id="' + c.id + '"]' });
+      }
       if (c.materialId) {
         need(c.perimeter2, 'Колонна ' + (i + 1) + ': периметр ст.2', '[data-role="col-perim2"][data-id="' + c.id + '"]');
         need(c.height2, 'Колонна ' + (i + 1) + ': высота ст.2', '[data-role="col-h2"][data-id="' + c.id + '"]');
@@ -2651,6 +2671,30 @@ if (typeof module !== 'undefined' && require.main === module) {
   assertClose('справочник: уникальных имён', state.responsibles.length, 2);
   assertClose('справочник: отсортирован (Иванов первый)',
     state.responsibles[0] === 'Иванов' ? 1 : 0, 1);
+
+  // Валидация ст.2: материал обязателен для задействованной поверхности (есть план.толщина).
+  const matRoom = {
+    stage1: {
+      height: 3000, length: 4000, width: 3000, responsible: 'Иванов',
+      floor: { materialId: '', thicknessPlan: '' },
+      walls: {
+        A: { materialId: '', thicknessPlan: '', openings: [] },   // пустая — материал не нужен
+        B: { materialId: '', thicknessPlan: 40, openings: [] },   // план есть, материала нет → нужен
+        V: { materialId: '', thicknessPlan: '', openings: [] },
+        G: { materialId: '', thicknessPlan: '', openings: [] }
+      },
+      columns: []
+    },
+    stage2: {
+      height: 3000, length: 3950, width: 3000, workOrder: 'plaster_first', responsible: 'Петров',
+      walls: { A: { openings: [] }, B: { openings: [] }, V: { openings: [] }, G: { openings: [] } }
+    }
+  };
+  const miss2 = measureMissing(matRoom, 2);
+  assertClose('ст.2: стена с план.толщиной без материала → «нужен материал»',
+    miss2.some(function (m) { return m.label === 'Стена Б: материал'; }) ? 1 : 0, 1);
+  assertClose('ст.2: пустая стена материал НЕ требует',
+    miss2.some(function (m) { return m.label === 'Стена А: материал'; }) ? 1 : 0, 0);
 
   console.log('--- Тест 6: calcProject — Δ<0 при перерасходе (факт>план) ---');
   // Собираем объект с одной комнатой, где факт пола больше плана.
